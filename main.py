@@ -8,6 +8,7 @@ import re
 import shutil
 import uuid
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -15,12 +16,12 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 from .core.config import AISummaryConfig, parse_config
-from .core.logger import logger
 from .core.summary import AISummaryManager
 
 
@@ -48,7 +49,7 @@ class VideoCandidate:
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "基于本地语音转写，结合用户提示词与视觉信息的多模态 AI 视频总结工具",
-    "0.1.0",
+    "0.1.1",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered video summaries."""
@@ -238,15 +239,27 @@ class AISummaryPlugin(Star):
     ) -> List[Dict[str, Any]]:
         """Download candidate videos, run summaries, and clean temporary files."""
         metadata_list: List[Dict[str, Any]] = []
+        started_at = time.perf_counter()
+        self._debug("批处理开始: candidates=%d", len(candidates))
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(
                     total=max(30, self.config.download_timeout_seconds)
                 )
             ) as session:
-                for candidate in candidates:
+                for index, candidate in enumerate(candidates, start=1):
+                    self._debug(
+                        "候选[%d]准备开始: source=%r",
+                        index,
+                        candidate.source,
+                    )
                     try:
                         metadata = await self._prepare_candidate(session, candidate)
+                        self._debug(
+                            "候选[%d]准备完成: error=%s",
+                            index,
+                            bool(metadata.get("ai_summary_error")),
+                        )
                     except Exception as exc:
                         logger.warning(
                             f"AI 总结候选准备失败: source={candidate.source!r}, 错误: {exc}"
@@ -260,9 +273,19 @@ class AISummaryPlugin(Star):
                 metadata for metadata in metadata_list
                 if not metadata.get("ai_summary_error")
             ]
+            self._debug(
+                "候选准备汇总: total=%d ready=%d failed=%d",
+                len(metadata_list),
+                len(ready),
+                len(metadata_list) - len(ready),
+            )
             if ready:
                 await self.summary_manager.summarize_metadata_list(ready)
         except asyncio.CancelledError:
+            self._debug(
+                "批处理被取消: elapsed=%.2fs",
+                time.perf_counter() - started_at,
+            )
             raise
         except Exception as exc:
             logger.warning(f"AI 总结批处理失败: {exc}")
@@ -270,6 +293,11 @@ class AISummaryPlugin(Star):
                 metadata.setdefault("ai_summary_error", str(exc))
         finally:
             self._cleanup_downloaded_files(metadata_list)
+            self._debug(
+                "批处理结束: metadata=%d elapsed=%.2fs",
+                len(metadata_list),
+                time.perf_counter() - started_at,
+            )
         return metadata_list
 
     def _debug(self, message: str, *args: Any) -> None:
@@ -280,6 +308,14 @@ class AISummaryPlugin(Star):
         except Exception:
             text = message
         logger.info(f"AI 总结调试: {text}")
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        if size < 1024:
+            return f"{size}B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f}KB"
+        return f"{size / 1024 / 1024:.1f}MB"
 
     def _is_admin_test_keyword(self, text: str) -> bool:
         keyword = str(getattr(self.config, "admin_test_keyword", "") or "").strip()
@@ -356,11 +392,17 @@ class AISummaryPlugin(Star):
                 downloaded_path = video_path
             else:
                 raise RuntimeError(f"不支持的视频来源: {source}")
-            self._debug("候选源准备完成: source=%r path=%r", source, video_path)
+            file_size = os.path.getsize(video_path)
+            self._debug(
+                "候选源准备完成: source=%r path=%r size=%s",
+                source,
+                video_path,
+                self._format_bytes(file_size),
+            )
 
             max_bytes = int(self.config.max_video_size_mb * 1024 * 1024)
-            if max_bytes > 0 and os.path.getsize(video_path) > max_bytes:
-                size_mb = os.path.getsize(video_path) / 1024 / 1024
+            if max_bytes > 0 and file_size > max_bytes:
+                size_mb = file_size / 1024 / 1024
                 raise RuntimeError(f"视频超过大小限制: {size_mb:.1f}MB")
 
             metadata = dict(candidate.metadata)
@@ -390,9 +432,23 @@ class AISummaryPlugin(Star):
         suffix = self._suffix_for_url(url)
         target = cache_dir / f"{uuid.uuid4().hex}{suffix}"
         max_bytes = int(self.config.max_video_size_mb * 1024 * 1024)
+        started_at = time.perf_counter()
+        self._debug(
+            "下载开始: url=%r target=%r max_size=%s timeout=%ss",
+            url,
+            str(target),
+            self._format_bytes(max_bytes) if max_bytes > 0 else "unlimited",
+            self.config.download_timeout_seconds,
+        )
 
         try:
             async with session.get(url) as response:
+                self._debug(
+                    "下载响应: status=%s content_length=%r content_type=%r",
+                    response.status,
+                    response.headers.get("Content-Length"),
+                    response.headers.get("Content-Type"),
+                )
                 if response.status >= 400:
                     raise RuntimeError(f"下载视频失败: HTTP {response.status}")
                 content_length = response.headers.get("Content-Length")
@@ -416,26 +472,43 @@ class AISummaryPlugin(Star):
                             )
                         fh.write(chunk)
         except asyncio.CancelledError:
+            self._debug(
+                "下载被取消: target=%r elapsed=%.2fs",
+                str(target),
+                time.perf_counter() - started_at,
+            )
             try:
                 if target.exists():
                     target.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._debug("下载取消后清理失败: path=%r error=%s", str(target), exc)
             raise
-        except Exception:
+        except Exception as exc:
+            self._debug(
+                "下载失败: target=%r elapsed=%.2fs error=%s",
+                str(target),
+                time.perf_counter() - started_at,
+                exc,
+            )
             try:
                 if target.exists():
                     target.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._debug("下载失败后清理失败: path=%r error=%s", str(target), exc)
             raise
 
         if target.stat().st_size <= 0:
             try:
                 target.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._debug("空视频文件清理失败: path=%r error=%s", str(target), exc)
             raise RuntimeError("下载到空视频文件")
+        self._debug(
+            "下载完成: path=%r size=%s elapsed=%.2fs",
+            str(target),
+            self._format_bytes(target.stat().st_size),
+            time.perf_counter() - started_at,
+        )
         return str(target)
 
     def _cleanup_downloaded_files(
@@ -545,11 +618,11 @@ class AISummaryPlugin(Star):
 
         return candidates
 
-    @staticmethod
-    def _safe_get_messages(event: AstrMessageEvent) -> List[Any]:
+    def _safe_get_messages(self, event: AstrMessageEvent) -> List[Any]:
         try:
             return list(event.get_messages() or [])
-        except Exception:
+        except Exception as exc:
+            self._debug("读取消息组件失败: error=%s", exc)
             return []
 
     async def _call_platform_action_compat(

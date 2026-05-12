@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..logger import logger
+from astrbot.api import logger
 
 
 DEFAULT_REQUIRED_MODULES = ["funasr", "modelscope", "torch", "torchaudio"]
@@ -111,6 +111,11 @@ def _subprocess_group_kwargs() -> Dict[str, Any]:
     return {"start_new_session": True}
 
 
+def _log_cleanup_error(action: str, exc: Exception) -> None:
+    """Record cleanup failures without interrupting shutdown paths."""
+    logger.debug(f"AI 总结子进程清理忽略异常: action={action}, error={exc}")
+
+
 def _terminate_subprocess(proc: subprocess.Popen[Any]) -> None:
     """Best-effort terminate a subprocess and its children."""
     if proc.poll() is not None:
@@ -126,36 +131,43 @@ def _terminate_subprocess(proc: subprocess.Popen[Any]) -> None:
                 errors="replace",
                 timeout=5,
             )
-        except Exception:
+        except Exception as exc:
+            _log_cleanup_error("taskkill", exc)
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as kill_exc:
+                _log_cleanup_error("proc.kill after taskkill", kill_exc)
     else:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-        except Exception:
+        except Exception as exc:
+            _log_cleanup_error("os.killpg SIGTERM", exc)
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as terminate_exc:
+                _log_cleanup_error(
+                    "proc.terminate after SIGTERM",
+                    terminate_exc,
+                )
     try:
         proc.wait(timeout=5)
-    except Exception:
+    except Exception as exc:
+        _log_cleanup_error("proc.wait after terminate", exc)
         try:
             if os.name == "nt":
                 proc.kill()
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
+        except Exception as kill_exc:
+            _log_cleanup_error("force kill process group", kill_exc)
             try:
                 proc.kill()
-            except Exception:
-                pass
+            except Exception as fallback_exc:
+                _log_cleanup_error("fallback proc.kill", fallback_exc)
         try:
             proc.wait(timeout=5)
-        except Exception:
-            pass
+        except Exception as wait_exc:
+            _log_cleanup_error("proc.wait after force kill", wait_exc)
 
 
 def _python_has_modules(
@@ -184,8 +196,8 @@ def _python_has_modules(
             if return_code is not None:
                 try:
                     proc.communicate(timeout=1)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_cleanup_error("proc.communicate after module check", exc)
                 return return_code == 0
             time.sleep(0.2)
     except RuntimeStopRequested:
@@ -282,8 +294,8 @@ def _run_subprocess_with_progress(
         finally:
             try:
                 stream.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("stream.close", exc)
 
     proc = subprocess.Popen(
         command,
@@ -370,8 +382,8 @@ def _run_subprocess_with_progress(
     except Exception:
         try:
             _terminate_subprocess(proc)
-        except Exception:
-            pass
+        except Exception as terminate_exc:
+            _log_cleanup_error("terminate subprocess after runner error", terminate_exc)
         raise
 
 
@@ -620,8 +632,8 @@ class AsrPythonRuntimeManager:
             try:
                 if self.install_lock_path.exists():
                     self.install_lock_path.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("dependency install lock unlink", exc)
 
     async def _wait_for_external_install(self, python_path: str) -> None:
         """Wait for another plugin instance to finish dependency installation."""
@@ -928,8 +940,8 @@ class AsrModelRuntimeManager:
             try:
                 if self.lock_path.exists():
                     self.lock_path.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("model download lock unlink", exc)
             if self._stop_event.is_set():
                 self._cleanup_stale_download_artifacts()
 
@@ -964,8 +976,8 @@ class AsrModelRuntimeManager:
         try:
             if self.lock_path.exists():
                 self.lock_path.unlink()
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_cleanup_error("stale model download lock unlink", exc)
         tmp_dir = self._download_tmp_dir()
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)

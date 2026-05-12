@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from astrbot.api.star import StarTools
+
 from .summary.prompts import (
     DEFAULT_STYLE_PROMPTS,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
@@ -18,33 +20,9 @@ from .summary.llm_provider_defs import (
 )
 
 
-PLUGIN_NAME = "astrbot_plugin_ai_summary"
-
-
-
 def _default_cache_dir() -> str:
     """Resolve the plugin-owned data directory for runtime files."""
-    try:
-        from astrbot.core import astrbot_config
-
-        data_dir = str(astrbot_config.get("data_dir") or "").strip()
-        if data_dir:
-            return os.path.join(data_dir, "plugin_data", PLUGIN_NAME)
-    except Exception:
-        pass
-
-    try:
-        from astrbot.core.utils.io import get_astrbot_data_path
-
-        return os.path.join(
-            get_astrbot_data_path(),
-            "plugin_data",
-            PLUGIN_NAME,
-        )
-    except Exception:
-        pass
-
-    return os.path.join(os.getcwd(), "plugin_data", PLUGIN_NAME)
+    return str(StarTools.get_data_dir())
 
 
 @dataclass

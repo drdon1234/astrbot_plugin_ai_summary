@@ -410,6 +410,7 @@
             "debug_mode": {
                 "description": "调试日志",
                 "type": "bool",
+                "hint": "打开后会输出触发判断、候选提取、下载、ASR、视觉判定、视觉分析、LLM 调用、格式修复和清理等阶段日志，便于维护者排查问题",
                 "default": false
             },
             "test_keyword": {

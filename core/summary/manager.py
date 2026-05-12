@@ -8,18 +8,24 @@ import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
-from ..logger import logger
+from astrbot.api import logger
 from .asr_runtime import (
     AsrModelRuntimeManager,
     AsrPythonRuntimeManager,
     AsrRuntimeStateStore,
 )
 from .llm_client import LLMClient
+
+
+def _log_cleanup_error(action: str, exc: Exception) -> None:
+    """Record cleanup failures without interrupting cancellation paths."""
+    logger.debug(f"AI 总结清理忽略异常: action={action}, error={exc}")
 
 
 class AISummaryManager:
@@ -60,6 +66,35 @@ class AISummaryManager:
             max(1, int(getattr(config, "vision_max_concurrent", 2) or 2))
         )
 
+    def _debug(self, message: str, *args: Any) -> None:
+        if not bool(getattr(self.config, "debug_mode", False)):
+            return
+        try:
+            text = message % args if args else message
+        except Exception:
+            text = message
+        logger.info(f"AI 总结调试: {text}")
+
+    @staticmethod
+    def _format_bytes(size: int) -> str:
+        if size < 1024:
+            return f"{size}B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f}KB"
+        return f"{size / 1024 / 1024:.1f}MB"
+
+    @staticmethod
+    def _path_size(path: str) -> str:
+        try:
+            return AISummaryManager._format_bytes(os.path.getsize(path))
+        except OSError:
+            return "unknown"
+
+    @staticmethod
+    def _format_command(command: List[str]) -> str:
+        text = " ".join(str(part) for part in command)
+        return text if len(text) <= 500 else text[:500] + "...(已截断)"
+
     def start_background_prepare(self) -> None:
         """Kick off background preparation for ASR dependencies and models."""
         logger.info("AI 总结后台 ASR 准备调度")
@@ -78,26 +113,48 @@ class AISummaryManager:
         metadata_list: List[Dict[str, Any]],
     ) -> None:
         """Summarize all eligible prepared video metadata records."""
+        started_at = time.perf_counter()
         self.python_runtime.ensure_background_prepare_started()
         if self.python_runtime.get_status().state == "READY":
             self.asr_runtime.ensure_background_download_started()
 
-        tasks = [
-            asyncio.create_task(self._summarize_one(metadata))
-            for metadata in metadata_list
+        eligible = [
+            metadata for metadata in metadata_list
             if self._metadata_can_try_summary(metadata)
         ]
+        self._debug(
+            "总结批次开始: total=%d eligible=%d dependency_state=%s model_state=%s",
+            len(metadata_list),
+            len(eligible),
+            self.python_runtime.get_status().state,
+            self.asr_runtime.get_status().state,
+        )
+        tasks = [
+            asyncio.create_task(self._summarize_one(metadata))
+            for metadata in eligible
+        ]
         if not tasks:
+            self._debug("总结批次跳过: 无可总结视频")
             return
 
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
+            self._debug(
+                "总结批次被取消: eligible=%d elapsed=%.2fs",
+                len(eligible),
+                time.perf_counter() - started_at,
+            )
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        self._debug(
+            "总结批次完成: eligible=%d elapsed=%.2fs",
+            len(eligible),
+            time.perf_counter() - started_at,
+        )
 
     def _metadata_can_try_summary(self, metadata: Dict[str, Any]) -> bool:
         """Return whether metadata has enough information for a summary attempt."""
@@ -108,7 +165,19 @@ class AISummaryManager:
     async def _summarize_one(self, metadata: Dict[str, Any]) -> None:
         """Run ASR, optional visual analysis, and LLM summarization for one record."""
         async with self._summary_semaphore:
+            started_at = time.perf_counter()
+            source = str(metadata.get("url", "") or "")
             try:
+                self._debug("总结任务开始: url=%r", source)
+                dependency_status = self.python_runtime.get_status()
+                model_status = self.asr_runtime.get_status()
+                self._debug(
+                    "运行时状态: dependency=%s message=%r model=%s message=%r",
+                    dependency_status.state,
+                    dependency_status.message,
+                    model_status.state,
+                    model_status.message,
+                )
                 await self._ensure_python_runtime_ready_for_request()
                 await self._ensure_asr_ready_for_request()
                 video_paths = self._local_video_paths(metadata)
@@ -117,23 +186,64 @@ class AISummaryManager:
                         "没有可用于总结的本地视频文件；请确认视频下载目录可用，"
                         "且视频未超过大小限制或下载失败"
                     )
+                self._debug(
+                    "本地视频路径: count=%d paths=%s",
+                    len(video_paths),
+                    video_paths,
+                )
 
                 summaries: List[str] = []
-                for video_path in video_paths:
+                for index, video_path in enumerate(video_paths, start=1):
+                    transcript_started_at = time.perf_counter()
+                    self._debug(
+                        "视频[%d] ASR开始: path=%r size=%s",
+                        index,
+                        video_path,
+                        self._path_size(video_path),
+                    )
                     transcript = await self._transcribe_video(video_path)
+                    self._debug(
+                        "视频[%d] ASR完成: transcript_chars=%d elapsed=%.2fs",
+                        index,
+                        len(transcript),
+                        time.perf_counter() - transcript_started_at,
+                    )
                     if len(transcript) > self.config.max_transcript_chars:
+                        self._debug(
+                            "视频[%d] 转写截断: original_chars=%d limit=%d",
+                            index,
+                            len(transcript),
+                            self.config.max_transcript_chars,
+                        )
                         transcript = transcript[: self.config.max_transcript_chars]
+                    decision_started_at = time.perf_counter()
                     visual_decision = await self._decide_visual_fallback(
                         metadata,
                         transcript,
                     )
+                    self._debug(
+                        "视频[%d] 视觉判定完成: need_visual=%s quality=%r reason=%r elapsed=%.2fs",
+                        index,
+                        visual_decision.get("need_visual"),
+                        visual_decision.get("transcript_quality"),
+                        visual_decision.get("reason"),
+                        time.perf_counter() - decision_started_at,
+                    )
                     visual = ""
                     if visual_decision.get("need_visual"):
                         try:
+                            visual_started_at = time.perf_counter()
+                            self._debug("视频[%d] 视觉分析开始", index)
                             visual = await self._analyze_video_visuals(
                                 video_path,
                                 metadata,
                                 transcript,
+                            )
+                            self._debug(
+                                "视频[%d] 视觉分析完成: chars=%d elapsed=%.2fs",
+                                index,
+                                len(visual),
+                                time.perf_counter() - visual_started_at,
                             )
                         except asyncio.CancelledError:
                             raise
@@ -143,18 +253,44 @@ class AISummaryManager:
                             )
                             visual = f"视觉兜底失败：{e}"
 
+                    llm_started_at = time.perf_counter()
+                    self._debug("视频[%d] LLM总结开始", index)
                     summary = await self._call_llm_summary(
                         metadata,
                         transcript,
                         visual,
                         visual_decision,
                     )
+                    self._debug(
+                        "视频[%d] LLM总结完成: summary_chars=%d elapsed=%.2fs",
+                        index,
+                        len(summary),
+                        time.perf_counter() - llm_started_at,
+                    )
                     summaries.append(summary)
 
                 metadata["ai_summary"] = "\n\n".join(summaries).strip()
+                self._debug(
+                    "总结任务完成: url=%r videos=%d summary_chars=%d elapsed=%.2fs",
+                    source,
+                    len(video_paths),
+                    len(metadata["ai_summary"]),
+                    time.perf_counter() - started_at,
+                )
             except asyncio.CancelledError:
+                self._debug(
+                    "总结任务被取消: url=%r elapsed=%.2fs",
+                    source,
+                    time.perf_counter() - started_at,
+                )
                 raise
             except Exception as e:
+                self._debug(
+                    "总结任务失败: url=%r elapsed=%.2fs error=%s",
+                    source,
+                    time.perf_counter() - started_at,
+                    e,
+                )
                 logger.warning(
                     f"AI 总结失败: {metadata.get('url', '')}, 错误: {e}"
                 )
@@ -217,21 +353,48 @@ class AISummaryManager:
             wav_path = os.path.join(temp_dir, "audio.wav")
             result_path = os.path.join(temp_dir, "transcript.json")
             try:
+                audio_started_at = time.perf_counter()
+                self._debug(
+                    "音频提取开始: video=%r wav=%r",
+                    video_path,
+                    wav_path,
+                )
                 await self._extract_audio(video_path, wav_path)
+                self._debug(
+                    "音频提取完成: wav=%r size=%s elapsed=%.2fs",
+                    wav_path,
+                    self._path_size(wav_path),
+                    time.perf_counter() - audio_started_at,
+                )
             except RuntimeError as exc:
                 if self._is_no_audio_error(str(exc)):
+                    self._debug("音频提取结果: 无音频流 video=%r", video_path)
                     return ""
                 raise
             try:
+                asr_started_at = time.perf_counter()
+                self._debug(
+                    "ASR worker开始: wav=%r result=%r",
+                    wav_path,
+                    result_path,
+                )
                 await self._run_asr_worker(wav_path, result_path)
+                self._debug(
+                    "ASR worker完成: result=%r size=%s elapsed=%.2fs",
+                    result_path,
+                    self._path_size(result_path),
+                    time.perf_counter() - asr_started_at,
+                )
             except RuntimeError as exc:
                 if self._is_empty_asr_error(str(exc)):
+                    self._debug("ASR worker结果: 空转写 wav=%r", wav_path)
                     return ""
                 raise
             data = json.loads(
                 Path(result_path).read_text(encoding="utf-8")
             )
             text = str(data.get("text", "") or "").strip()
+            self._debug("转写读取完成: chars=%d", len(text))
             return text
 
     @staticmethod
@@ -288,6 +451,8 @@ class AISummaryManager:
         """Run the isolated FunASR worker process for one WAV file."""
         worker_path = Path(__file__).with_name("asr_worker.py")
         python_path = self.python_runtime.get_python_path()
+        asr_model_ref = self._effective_model_ref("asr")
+        vad_model_ref = self._effective_model_ref("vad")
         command = [
             python_path,
             str(worker_path),
@@ -296,9 +461,9 @@ class AISummaryManager:
             "--output",
             output_path,
             "--model",
-            self._effective_model_ref("asr"),
+            asr_model_ref,
             "--vad-model",
-            self._effective_model_ref("vad"),
+            vad_model_ref,
             "--models-dir",
             self.config.asr_model_dir,
             "--device",
@@ -306,6 +471,14 @@ class AISummaryManager:
             "--batch-size-s",
             str(self.config.batch_size_s),
         ]
+        self._debug(
+            "ASR worker参数: python=%r device=%r batch_size_s=%s asr_model=%r vad_model=%r",
+            python_path,
+            self.config.device,
+            self.config.batch_size_s,
+            asr_model_ref,
+            vad_model_ref,
+        )
         async with self._asr_semaphore:
             await self._run_subprocess(
                 command,
@@ -329,13 +502,26 @@ class AISummaryManager:
         error_prefix: str,
     ) -> None:
         """Run a subprocess and convert failures into user-facing runtime errors."""
+        started_at = time.perf_counter()
+        self._debug(
+            "子进程启动: prefix=%r timeout=%ss command=%s",
+            error_prefix,
+            timeout,
+            self._format_command(command),
+        )
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-            )
+        )
         except FileNotFoundError as exc:
+            self._debug(
+                "子进程启动失败: prefix=%r executable=%r elapsed=%.2fs",
+                error_prefix,
+                command[0],
+                time.perf_counter() - started_at,
+            )
             raise RuntimeError(f"{error_prefix}: 找不到可执行文件 {command[0]}") from exc
 
         try:
@@ -344,27 +530,49 @@ class AISummaryManager:
                 timeout=timeout,
             )
         except asyncio.CancelledError:
+            self._debug(
+                "子进程被取消: prefix=%r elapsed=%.2fs",
+                error_prefix,
+                time.perf_counter() - started_at,
+            )
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("kill subprocess after cancellation", exc)
             await process.communicate()
             raise
         except asyncio.TimeoutError as exc:
+            self._debug(
+                "子进程超时: prefix=%r timeout=%ss elapsed=%.2fs",
+                error_prefix,
+                timeout,
+                time.perf_counter() - started_at,
+            )
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as kill_exc:
+                _log_cleanup_error("kill subprocess after timeout", kill_exc)
             await process.communicate()
             raise RuntimeError(f"{error_prefix}: 执行超时") from exc
 
         if process.returncode != 0:
+            self._debug(
+                "子进程失败: prefix=%r returncode=%s elapsed=%.2fs",
+                error_prefix,
+                process.returncode,
+                time.perf_counter() - started_at,
+            )
             detail = (
                 stderr.decode("utf-8", errors="replace").strip()
                 or stdout.decode("utf-8", errors="replace").strip()
                 or f"退出码 {process.returncode}"
             )
             raise RuntimeError(f"{error_prefix}: {detail}")
+        self._debug(
+            "子进程完成: prefix=%r elapsed=%.2fs",
+            error_prefix,
+            time.perf_counter() - started_at,
+        )
 
     async def _call_llm_summary(
         self,
@@ -383,6 +591,12 @@ class AISummaryManager:
             transcript,
             visual,
             visual_decision or {},
+        )
+        self._debug(
+            "总结Prompt准备完成: transcript_chars=%d visual_chars=%d prompt_chars=%d",
+            len(transcript),
+            len(visual),
+            len(prompt),
         )
         payload: Dict[str, Any] = {
             "model": self.config.model,
@@ -455,8 +669,13 @@ class AISummaryManager:
         }
         if int(getattr(self.config, "vision_max_frames", 8) or 0) <= 0:
             decision["reason"] = "视觉帧分析已关闭"
+            self._debug("视觉判定跳过: max_frames<=0")
             return decision
         if not self._llm_can_try(metadata):
+            self._debug(
+                "视觉判定跳过: LLM配置不足 missing=%s",
+                self._missing_llm_fields(metadata),
+            )
             return decision
 
         prompt = self._render_template(
@@ -476,6 +695,12 @@ class AISummaryManager:
             "max_completion_tokens": 300,
         }
         try:
+            started_at = time.perf_counter()
+            self._debug(
+                "视觉判定请求开始: transcript_chars=%d timeout=%ss",
+                len(transcript),
+                self.config.request_timeout_seconds,
+            )
             content = await self._post_chat_completion(
                 payload,
                 timeout_seconds=self.config.request_timeout_seconds,
@@ -501,6 +726,14 @@ class AISummaryManager:
             if not decision["reason"]:
                 decision["reason"] = "模型判定"
             metadata["ai_summary_visual_decision"] = decision
+            self._debug(
+                "视觉判定请求完成: need_visual=%s quality=%r reason=%r response_chars=%d elapsed=%.2fs",
+                decision.get("need_visual"),
+                decision.get("transcript_quality"),
+                decision.get("reason"),
+                len(content),
+                time.perf_counter() - started_at,
+            )
             return decision
         except asyncio.CancelledError:
             raise
@@ -519,6 +752,7 @@ class AISummaryManager:
                     "transcript_quality": "unknown",
                 }
             metadata["ai_summary_visual_decision"] = decision
+            self._debug("视觉判定降级: decision=%s", decision)
             return decision
 
     async def _post_chat_completion(
@@ -530,16 +764,64 @@ class AISummaryManager:
         image_paths: Optional[List[str]] = None,
     ) -> str:
         """Route a chat payload through AstrBot's provider or the custom client."""
-        if self._use_astrbot_provider():
-            return await self._post_astrbot_completion(
-                payload,
-                metadata=metadata or {},
-                image_paths=image_paths or [],
-            )
-        return await self.llm_client.complete(
-            payload,
-            timeout_seconds=timeout_seconds,
+        route = (
+            "astrbot"
+            if self._use_astrbot_provider()
+            else f"custom:{getattr(self.config, 'llm_provider', '') or 'unknown'}"
         )
+        image_count = len(image_paths or [])
+        if image_count <= 0:
+            image_count = self._payload_image_count(payload)
+        started_at = time.perf_counter()
+        self._debug(
+            "LLM请求开始: route=%s model=%r messages=%d images=%d timeout=%ss",
+            route,
+            payload.get("model"),
+            len(payload.get("messages") or []),
+            image_count,
+            timeout_seconds,
+        )
+        try:
+            if self._use_astrbot_provider():
+                text = await self._post_astrbot_completion(
+                    payload,
+                    metadata=metadata or {},
+                    image_paths=image_paths or [],
+                )
+            else:
+                text = await self.llm_client.complete(
+                    payload,
+                    timeout_seconds=timeout_seconds,
+                )
+        except Exception as exc:
+            self._debug(
+                "LLM请求失败: route=%s elapsed=%.2fs error=%s",
+                route,
+                time.perf_counter() - started_at,
+                exc,
+            )
+            raise
+        self._debug(
+            "LLM请求完成: route=%s response_chars=%d elapsed=%.2fs",
+            route,
+            len(text),
+            time.perf_counter() - started_at,
+        )
+        return text
+
+    @staticmethod
+    def _payload_image_count(payload: Dict[str, Any]) -> int:
+        count = 0
+        for message in payload.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    count += 1
+        return count
 
     def _use_astrbot_provider(self) -> bool:
         """Return whether summaries should use AstrBot's built-in AI provider."""
@@ -577,6 +859,13 @@ class AISummaryManager:
         provider_id = await self._astrbot_provider_id(metadata)
         system_prompt, prompt, payload_images = self._payload_to_astrbot_chat(payload)
         image_urls = image_paths or payload_images
+        self._debug(
+            "AstrBot LLM调用: provider_id=%r prompt_chars=%d system_chars=%d images=%d",
+            provider_id,
+            len(prompt),
+            len(system_prompt),
+            len(image_urls),
+        )
         response = await self._call_astrbot_llm_generate(
             provider_id=provider_id,
             prompt=prompt,
@@ -762,6 +1051,12 @@ class AISummaryManager:
     ) -> str:
         """Remove raw transcript leakage and optionally repair summary format."""
         cleaned, issues = self._clean_summary_output(summary, transcript)
+        self._debug(
+            "总结后处理开始: raw_chars=%d cleaned_chars=%d issues=%s",
+            len(summary),
+            len(cleaned),
+            issues,
+        )
         if self._summary_repair_enabled() and self._summary_needs_llm_repair(
             cleaned,
             transcript,
@@ -769,12 +1064,24 @@ class AISummaryManager:
         ):
             repair_input = cleaned or str(summary or "").strip()
             try:
+                started_at = time.perf_counter()
+                self._debug(
+                    "总结格式修复开始: input_chars=%d issues=%s",
+                    len(repair_input),
+                    issues,
+                )
                 repaired = await self._repair_summary_with_llm(
                     repair_input,
                     issues,
                     metadata or {},
                 )
                 repaired_cleaned, _ = self._clean_summary_output(repaired, transcript)
+                self._debug(
+                    "总结格式修复完成: repaired_chars=%d cleaned_chars=%d elapsed=%.2fs",
+                    len(repaired),
+                    len(repaired_cleaned),
+                    time.perf_counter() - started_at,
+                )
                 if repaired_cleaned:
                     cleaned = repaired_cleaned
                     if not self._summary_needs_llm_repair(
@@ -787,8 +1094,10 @@ class AISummaryManager:
                 raise
             except Exception as exc:
                 logger.warning(f"AI 总结格式修复失败，使用确定性清理结果: {exc}")
+                self._debug("总结格式修复失败: error=%s", exc)
 
         if cleaned:
+            self._debug("总结后处理完成: final_chars=%d", len(cleaned))
             return cleaned
         raise RuntimeError("LLM 总结只包含原始转写或无效内容，已被过滤")
 
@@ -1001,18 +1310,37 @@ class AISummaryManager:
             prefix="ai_visual_",
             dir=self._summary_tmp_parent(),
         ) as temp_dir:
+            started_at = time.perf_counter()
+            self._debug(
+                "视觉抽帧开始: video=%r temp_dir=%r max_frames=%s width=%s",
+                video_path,
+                temp_dir,
+                self.config.vision_max_frames,
+                self.config.vision_frame_width,
+            )
             frames = await self._extract_visual_frames(
                 video_path,
                 Path(temp_dir),
             )
             if not frames:
                 raise RuntimeError("未能从视频中抽取视觉帧")
+            self._debug(
+                "视觉抽帧完成: frames=%d elapsed=%.2fs",
+                len(frames),
+                time.perf_counter() - started_at,
+            )
 
             batch_size = max(1, int(self.config.vision_batch_size or 4))
             batches = [
                 frames[index:index + batch_size]
                 for index in range(0, len(frames), batch_size)
             ]
+            self._debug(
+                "视觉分析批次: frames=%d batch_size=%d batches=%d",
+                len(frames),
+                batch_size,
+                len(batches),
+            )
 
             async def run_batch(
                 batch_index: int,
@@ -1041,6 +1369,8 @@ class AISummaryManager:
         max_chars = max(1000, int(self.config.vision_max_chars or 8000))
         if len(visual) > max_chars:
             visual = visual[:max_chars] + "\n（视觉观察因长度限制已截断）"
+            self._debug("视觉观察截断: max_chars=%d", max_chars)
+        self._debug("视觉分析汇总完成: chars=%d", len(visual))
         return visual
 
     async def _extract_visual_frames(
@@ -1053,12 +1383,20 @@ class AISummaryManager:
         duration = await self._probe_duration(video_path)
         max_frames = int(self.config.vision_max_frames or 0)
         if max_frames <= 0:
+            self._debug("视觉抽帧跳过: max_frames=%d", max_frames)
             return []
         width = int(self.config.vision_frame_width or 0)
         quality = max(2, min(31, int(self.config.vision_jpeg_quality or 4)))
         frames: List[Tuple[Path, float]] = []
 
         times = self._sample_frame_times(duration, max_frames)
+        self._debug(
+            "视觉抽帧参数: duration=%s sample_times=%s width=%d quality=%d",
+            f"{duration:.2f}s" if duration else "unknown",
+            [round(value, 2) for value in times],
+            width,
+            quality,
+        )
         if times:
             for index, timestamp in enumerate(times, start=1):
                 frame_path = output_dir / f"frame_{index:03d}.jpg"
@@ -1090,10 +1428,16 @@ class AISummaryManager:
                         error_prefix="视觉帧抽取失败",
                     )
                 except RuntimeError as exc:
-                    logger.debug(f"跳过视觉帧 {index}: {exc}")
+                    self._debug(
+                        "跳过视觉帧: index=%d timestamp=%.2fs error=%s",
+                        index,
+                        timestamp,
+                        exc,
+                    )
                     continue
                 if frame_path.exists() and frame_path.stat().st_size > 0:
                     frames.append((frame_path, timestamp))
+            self._debug("视觉定点抽帧结果: frames=%d", len(frames))
             return frames
 
         pattern = output_dir / "frame_%03d.jpg"
@@ -1121,6 +1465,7 @@ class AISummaryManager:
         for index, frame_path in enumerate(sorted(output_dir.glob("frame_*.jpg")), start=1):
             if frame_path.stat().st_size > 0:
                 frames.append((frame_path, float(index - 1) * 5.0))
+        self._debug("视觉fallback抽帧结果: frames=%d", len(frames))
         return frames
 
     @staticmethod
@@ -1161,15 +1506,15 @@ class AISummaryManager:
         except asyncio.CancelledError:
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("kill ffprobe after cancellation", exc)
             await process.communicate()
             raise
         except asyncio.TimeoutError:
             try:
                 process.kill()
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_cleanup_error("kill ffprobe after timeout", exc)
             await process.communicate()
             return None
         if process.returncode != 0:
@@ -1214,9 +1559,16 @@ class AISummaryManager:
         batch_index: int,
     ) -> str:
         """Send one batch of sampled frames to the configured visual-capable LLM."""
+        started_at = time.perf_counter()
         frame_notes = "\n".join(
             f"帧{index}: 约 {timestamp:.1f}s"
             for index, (_, timestamp) in enumerate(frames, start=1)
+        )
+        self._debug(
+            "视觉批次请求开始: batch=%d frames=%d timestamps=%s",
+            batch_index,
+            len(frames),
+            [round(timestamp, 2) for _, timestamp in frames],
         )
         prompt = self._render_template(
             self.config.visual_analysis_prompt,
@@ -1250,12 +1602,19 @@ class AISummaryManager:
                 max(300, int(self.config.max_completion_tokens or 1800)),
             ),
         }
-        return await self._post_chat_completion(
+        result = await self._post_chat_completion(
             payload,
             timeout_seconds=self.config.vision_request_timeout_seconds,
             metadata=metadata,
             image_paths=[str(frame_path) for frame_path, _ in frames],
         )
+        self._debug(
+            "视觉批次请求完成: batch=%d chars=%d elapsed=%.2fs",
+            batch_index,
+            len(result),
+            time.perf_counter() - started_at,
+        )
+        return result
 
     @staticmethod
     def _image_data_url(path: Path) -> str:
