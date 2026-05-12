@@ -20,9 +20,12 @@ from .summary.llm_provider_defs import (
 )
 
 
+PLUGIN_NAME = "astrbot_plugin_ai_summary"
+
+
 def _default_cache_dir() -> str:
     """Resolve the plugin-owned data directory for runtime files."""
-    return str(StarTools.get_data_dir())
+    return str(StarTools.get_data_dir(PLUGIN_NAME))
 
 
 @dataclass
