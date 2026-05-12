@@ -49,7 +49,7 @@ class VideoCandidate:
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "基于本地语音转写，结合用户提示词与视觉信息的多模态 AI 视频总结工具",
-    "0.1.2",
+    "0.1.1",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered video summaries."""
