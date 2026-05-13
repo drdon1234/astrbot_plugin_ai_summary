@@ -181,6 +181,7 @@ def _python_has_modules(
     try:
         proc = subprocess.Popen(
             [python_path, "-c", checks],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -299,6 +300,7 @@ def _run_subprocess_with_progress(
 
     proc = subprocess.Popen(
         command,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

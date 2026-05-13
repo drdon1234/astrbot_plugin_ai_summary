@@ -18,6 +18,7 @@ class LLMProviderDefinition:
     default_base_url: str
     requires_api_key: bool
     default_api_version: str = ""
+    token_limit_field: str = "max_tokens"
 
 
 @dataclass
@@ -39,6 +40,7 @@ PROVIDER_DEFINITIONS: Dict[str, LLMProviderDefinition] = {
         protocol="openai",
         default_base_url="https://api.openai.com/v1",
         requires_api_key=True,
+        token_limit_field="max_completion_tokens",
     ),
     "azure_openai": LLMProviderDefinition(
         key="azure_openai",
@@ -179,9 +181,7 @@ class LLMClient:
         if provider.requires_api_key and not self._api_key():
             missing.append("API Key")
         if provider.protocol in {"openai", "azure_openai", "anthropic", "ollama"}:
-            if provider.key != "ollama" and not self._base_url():
-                missing.append("Base URL")
-            if provider.key == "ollama" and not self._base_url():
+            if not self._base_url():
                 missing.append("Base URL")
         elif provider.protocol == "gemini" and not self._base_url():
             missing.append("Base URL")
@@ -193,6 +193,7 @@ class LLMClient:
         *,
         use_max_tokens: bool = False,
         drop_temperature: bool = False,
+        token_limit_field: Optional[str] = None,
     ) -> ProviderHttpRequest:
         """Build a provider-specific HTTP request from a chat-style payload."""
         provider = self._provider_definition()
@@ -215,6 +216,7 @@ class LLMClient:
             payload,
             use_max_tokens=use_max_tokens,
             drop_temperature=drop_temperature,
+            token_limit_field=token_limit_field,
         )
 
     async def complete(
@@ -225,16 +227,17 @@ class LLMClient:
     ) -> str:
         """Send a completion request and retry with provider compatibility tweaks."""
         timeout = aiohttp.ClientTimeout(total=max(10, int(timeout_seconds)))
-        use_max_tokens = False
         drop_temperature = False
+        token_limit_field = self._provider_definition().token_limit_field
+        token_limit_retry_used = False
         working_payload = copy.deepcopy(payload)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for attempt in range(3):
                 request = self.build_http_request(
                     working_payload,
-                    use_max_tokens=use_max_tokens,
                     drop_temperature=drop_temperature,
+                    token_limit_field=token_limit_field,
                 )
                 try:
                     async with session.post(
@@ -250,8 +253,14 @@ class LLMClient:
                         return self.extract_content(json.loads(body))
                 except RuntimeError as exc:
                     message = str(exc)
-                    if attempt == 0 and self._should_retry_with_max_tokens(message):
-                        use_max_tokens = True
+                    if (
+                        not token_limit_retry_used
+                        and self._should_retry_token_limit_field(message)
+                    ):
+                        token_limit_field = self._alternate_token_limit_field(
+                            token_limit_field
+                        )
+                        token_limit_retry_used = True
                         continue
                     if attempt <= 1 and self._should_drop_temperature(message):
                         drop_temperature = True
@@ -303,15 +312,14 @@ class LLMClient:
         *,
         use_max_tokens: bool,
         drop_temperature: bool,
+        token_limit_field: Optional[str],
     ) -> ProviderHttpRequest:
         """Build an OpenAI-compatible chat completions request."""
         body = copy.deepcopy(payload)
-        if use_max_tokens:
-            max_tokens = body.pop(
-                "max_completion_tokens",
-                body.get("max_tokens", 0),
-            )
-            body["max_tokens"] = max_tokens
+        self._apply_openai_token_limit_field(
+            body,
+            self._token_limit_field(token_limit_field, use_max_tokens),
+        )
         if drop_temperature:
             body.pop("temperature", None)
         url = self._join_chat_completions_url(self._base_url() or self._provider_definition().default_base_url)
@@ -324,16 +332,15 @@ class LLMClient:
         *,
         use_max_tokens: bool,
         drop_temperature: bool,
+        token_limit_field: Optional[str],
     ) -> ProviderHttpRequest:
         """Build an Azure OpenAI deployment chat completions request."""
         body = copy.deepcopy(payload)
         body.pop("model", None)
-        if use_max_tokens:
-            max_tokens = body.pop(
-                "max_completion_tokens",
-                body.get("max_tokens", 0),
-            )
-            body["max_tokens"] = max_tokens
+        self._apply_openai_token_limit_field(
+            body,
+            self._token_limit_field(token_limit_field, use_max_tokens),
+        )
         if drop_temperature:
             body.pop("temperature", None)
         base_url = self._base_url()
@@ -362,6 +369,7 @@ class LLMClient:
         *,
         use_max_tokens: bool,
         drop_temperature: bool,
+        token_limit_field: Optional[str],
     ) -> ProviderHttpRequest:
         """Build an Anthropic messages request from chat-style input."""
         system, messages = self._split_system_and_messages(payload.get("messages") or [])
@@ -391,6 +399,7 @@ class LLMClient:
         *,
         use_max_tokens: bool,
         drop_temperature: bool,
+        token_limit_field: Optional[str],
     ) -> ProviderHttpRequest:
         """Build a Gemini generateContent request from chat-style input."""
         system, messages = self._split_system_and_messages(payload.get("messages") or [])
@@ -426,6 +435,7 @@ class LLMClient:
         *,
         use_max_tokens: bool,
         drop_temperature: bool,
+        token_limit_field: Optional[str],
     ) -> ProviderHttpRequest:
         """Build an Ollama chat request with optional image payloads."""
         messages = self._ollama_messages(payload.get("messages") or [])
@@ -702,13 +712,47 @@ class LLMClient:
         }
 
     @staticmethod
-    def _should_retry_with_max_tokens(message: str) -> bool:
+    def _should_retry_token_limit_field(message: str) -> bool:
         lowered = str(message or "").lower()
         return (
             "max_completion_tokens" in lowered
             or "max_tokens" in lowered
             or "unrecognized" in lowered
         )
+
+    def _token_limit_field(
+        self,
+        token_limit_field: Optional[str],
+        use_max_tokens: bool,
+    ) -> str:
+        if use_max_tokens:
+            return "max_tokens"
+        if token_limit_field in {"max_tokens", "max_completion_tokens"}:
+            return str(token_limit_field)
+        provider = self._provider_definition()
+        if provider.token_limit_field in {"max_tokens", "max_completion_tokens"}:
+            return provider.token_limit_field
+        return "max_tokens"
+
+    @staticmethod
+    def _alternate_token_limit_field(token_limit_field: str) -> str:
+        if token_limit_field == "max_tokens":
+            return "max_completion_tokens"
+        return "max_tokens"
+
+    @staticmethod
+    def _apply_openai_token_limit_field(
+        body: Dict[str, Any],
+        token_limit_field: str,
+    ) -> None:
+        if token_limit_field == "max_completion_tokens":
+            if "max_completion_tokens" not in body and "max_tokens" in body:
+                body["max_completion_tokens"] = body.pop("max_tokens")
+            else:
+                body.pop("max_tokens", None)
+            return
+        if "max_completion_tokens" in body:
+            body["max_tokens"] = body.pop("max_completion_tokens")
 
     @staticmethod
     def _should_drop_temperature(message: str) -> bool:
