@@ -15,5 +15,5 @@ plugin_data/
 .env
 *.zip
 test/
+tests/
 scripts/
-docs/superpowers/
