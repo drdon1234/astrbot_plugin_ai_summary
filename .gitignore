@@ -16,6 +16,4 @@ plugin_data/
 *.zip
 test/
 tests/
-!tests/
-!tests/*.py
 scripts/

@@ -17,6 +17,8 @@ PLUGIN_NAME = "astrbot_plugin_ai_summary"
 DEFAULT_AUTO_KEYWORDS = ["总结一下", "总结视频"]
 DEFAULT_BRIEF_KEYWORDS = ["简略总结", "简单总结"]
 DEFAULT_PROFESSIONAL_KEYWORDS = ["专业总结", "详细总结"]
+DEFAULT_QA_EXIT_COMMANDS = ["结束", "退出"]
+DEFAULT_QA_CLEAR_COMMANDS = ["清理", "清空"]
 
 
 def _default_cache_dir() -> str:
@@ -75,6 +77,15 @@ class AISummaryConfig:
     brief_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_BRIEF_KEYWORDS))
     professional_keywords: List[str] = field(
         default_factory=lambda: list(DEFAULT_PROFESSIONAL_KEYWORDS)
+    )
+    qa_enabled: bool = True
+    qa_record_ttl_minutes: int = 30
+    qa_history_turns: int = 5
+    qa_exit_commands: List[str] = field(
+        default_factory=lambda: list(DEFAULT_QA_EXIT_COMMANDS)
+    )
+    qa_clear_commands: List[str] = field(
+        default_factory=lambda: list(DEFAULT_QA_CLEAR_COMMANDS)
     )
     max_completion_tokens: int = 1800
     temperature: float = 0.2
@@ -194,6 +205,7 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
     advanced_vision_raw = _dict(advanced_quality_raw.get("vision", {}))
     advanced_asr_raw = _dict(advanced_quality_raw.get("asr", {}))
     output_raw = _dict(raw.get("output", {}))
+    qa_raw = _dict(raw.get("qa", {}))
     admin_raw = _dict(raw.get("admin", {}))
 
     provider_source = _normalize_llm_provider_source(
@@ -249,6 +261,27 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         auto_keywords=auto_keywords,
         brief_keywords=brief_keywords,
         professional_keywords=professional_keywords,
+        qa_enabled=bool(qa_raw.get("enable", True)),
+        qa_record_ttl_minutes=_int_config(
+            qa_raw.get("record_ttl_minutes"),
+            30,
+            minimum=0,
+            maximum=1440,
+        ),
+        qa_history_turns=_int_config(
+            qa_raw.get("history_turns"),
+            5,
+            minimum=0,
+            maximum=20,
+        ),
+        qa_exit_commands=_normalize_trigger_keywords(
+            qa_raw.get("exit_commands"),
+            DEFAULT_QA_EXIT_COMMANDS,
+        ),
+        qa_clear_commands=_normalize_trigger_keywords(
+            qa_raw.get("clear_commands"),
+            DEFAULT_QA_CLEAR_COMMANDS,
+        ),
         max_completion_tokens=_int_config(
             basic_summary_raw.get("max_completion_tokens"),
             1800,

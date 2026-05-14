@@ -9,7 +9,7 @@ _✨ 自动转写视频内容并生成总结 ✨_
 [![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-orange.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/Version-v0.1.5-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
+[![Version](https://img.shields.io/badge/Version-v0.2.0-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
 [![GitHub](https://img.shields.io/badge/作者-drdon1234-blue)](https://github.com/drdon1234)
 
 </div>
@@ -34,8 +34,26 @@ _✨ 自动转写视频内容并生成总结 ✨_
 6. 管理员可在私聊中发送 `aiping` 测试 AI 连通性。
 7. 总结、视觉判断和视觉分析均使用内置提示词，WebUI 不再暴露自定义提示词入口。
 8. 总结模式由触发命令决定：`总结一下` / `总结视频` 为自动，`简略总结` / `简单总结` 为简略，`专业总结` / `详细总结` 为专业。
+9. 首次总结结果会保存为同一私聊或群聊内的临时问答知识库；私聊和群聊都通过引用插件的总结或问答回复并输入问题来触发对应视频问答。每个视频会保留最近几轮问答作为短对话记忆。
+10. 问答知识库默认按最后检索时间保留 30 分钟，超过后自动清理；可在 `qa.record_ttl_minutes` 中调整，设为 `0` 可关闭自动清理。
 
 图片发送模式使用 Pillow 直接把总结内容绘制为温和浅色卡片图片，并固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，不依赖浏览器截图环境或系统字体。
+
+---
+
+## 💬 总结问答
+
+完成一次视频总结后，插件会把最终总结文本保存为临时知识库。私聊和群聊都通过引用插件的总结或问答回复来提问，输入的正文会直接作为问题：
+
+```text
+这个视频的核心结论是什么？
+它提到了哪些风险？
+有哪些关键人物或机构？
+```
+
+发送 `结束` 或 `退出` 会结束本轮问答，但不会删除已保存的总结知识库或引用绑定；发送 `清理` 或 `清空` 会清除当前私聊或群聊 scope 下的问答知识库。这两组命令可通过 `qa.exit_commands` 和 `qa.clear_commands` 调整。每条总结或问答回复都会带有 `问答ID` 标记并绑定对应的总结记录，后续引用哪条 AI 回复，就会自动切到那条视频的问答；图片发送模式会把 `问答ID` 作为同条消息里的文本标记一起发送，便于引用识别。
+
+问答不会重新分析视频；基础总结会作为当前视频上下文补充，最近问答会作为短对话记忆。涉及视频里具体发生了什么时，会优先参考基础总结，没覆盖就说明未覆盖；涉及通用知识、制作方法、工具建议、背景解释时，会正常使用 AI 的通用能力回答。临时知识库保存在 `cache_dir/runtime/qa_records/`，默认 30 分钟未被检索会自动删除，避免长期占用存储；每个视频默认只保留最近 5 轮问答，可通过 `qa.history_turns` 调整，设为 `0` 可关闭短对话记忆。
 
 ---
 
@@ -87,4 +105,7 @@ flowchart TD
     K --> M
     L --> M
     M --> N["返回总结消息"]
+    N --> O["保存临时总结知识库"]
+    O --> P{"引用总结或问答回复"}
+    P -- "命中" --> Q["基于绑定总结和最近问答回答"]
 ```

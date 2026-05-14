@@ -18,11 +18,19 @@ import aiohttp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 from .core.config import AISummaryConfig, parse_config
 from .core.output_render import render_summary_image_file
+from .core.qa_runtime import (
+    qa_missing_record_message,
+    qa_record_id_from_text,
+    qa_record_marker,
+    qa_scope_id,
+)
+from .core.qa_store import QARecordStore
 from .core.summary import AISummaryManager
 
 
@@ -46,11 +54,19 @@ class VideoCandidate:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class QARequest:
+    """A question bound to one saved summary record."""
+
+    question: str
+    record_id: str
+
+
 @register(
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "基于本地语音转写，结合用户提示词与视觉信息的多模态 AI 视频总结工具",
-    "0.1.5",
+    "0.2.0",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered video summaries."""
@@ -63,6 +79,8 @@ class AISummaryPlugin(Star):
             "AI 总结插件已载入: "
             f"cache_dir={self.config.cache_dir}, "
             f"runtime_dir={Path(self.config.cache_dir) / 'runtime'}, "
+            f"qa_ttl_minutes={self.config.qa_record_ttl_minutes}, "
+            f"qa_history_turns={self.config.qa_history_turns}, "
             f"model_dir={self.config.asr_model_dir}"
         )
         self.summary_manager = AISummaryManager(
@@ -71,9 +89,15 @@ class AISummaryPlugin(Star):
             True,
             context,
         )
+        self.qa_store = QARecordStore(
+            Path(self.config.cache_dir) / "runtime" / "qa_records",
+            self.config.qa_record_ttl_minutes,
+        )
         self.summary_manager.start_background_prepare()
         self._shutdown_event = threading.Event()
         self._active_tasks: set[asyncio.Task[Any]] = set()
+        self._qa_cleanup_task: Optional[asyncio.Task[Any]] = None
+        self._qa_reply_bindings: Dict[str, Dict[str, str]] = {}
         self._semaphore = asyncio.Semaphore(max(1, self.config.max_concurrent))
 
     async def terminate(self):
@@ -81,6 +105,7 @@ class AISummaryPlugin(Star):
         self._shutdown_event.set()
         shutdown_results = await asyncio.gather(
             self._cancel_active_tasks(),
+            self._cancel_qa_cleanup_task(),
             self.summary_manager.shutdown(),
             return_exceptions=True,
         )
@@ -100,6 +125,15 @@ class AISummaryPlugin(Star):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._active_tasks.clear()
+
+    async def _cancel_qa_cleanup_task(self) -> None:
+        """Cancel the periodic QA knowledge cleanup task."""
+        task = self._qa_cleanup_task
+        self._qa_cleanup_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     def _track_current_task(self) -> Optional[asyncio.Task[Any]]:
         task = asyncio.current_task()
@@ -172,9 +206,88 @@ class AISummaryPlugin(Star):
             self._untrack_current_task(current_task)
 
     @filter.event_message_type(EventMessageType.ALL)
+    async def answer_summary_question(self, event: AstrMessageEvent):
+        """Answer questions against the quoted summary knowledge record."""
+        if self._shutdown_event.is_set():
+            return
+        current_task = self._track_current_task()
+        try:
+            cfg = self.config
+            if not cfg.qa_enabled:
+                return
+
+            is_private = event.is_private_chat()
+            sender_id = event.get_sender_id()
+            group_id = None if is_private else event.get_group_id()
+            if not cfg.permission.check(is_private, sender_id, group_id):
+                return
+
+            scope_id = qa_scope_id(is_private, sender_id, group_id)
+            text = str(getattr(event, "message_str", "") or "").strip()
+            handled, message = self._handle_qa_control_command(text, scope_id)
+            if handled:
+                await event.send(event.plain_result(message))
+                self._stop_event(event)
+                return
+
+            command = self._qa_request_for_event(event, scope_id)
+            if command is None:
+                return
+
+            self._ensure_qa_cleanup_task()
+            self._cleanup_qa_records()
+            record = self.qa_store.get_record(scope_id, command.record_id)
+
+            if record is None:
+                await event.send(event.plain_result(qa_missing_record_message()))
+                self._stop_event(event)
+                return
+
+            try:
+                answer = await self.summary_manager.answer_summary_question(
+                    record,
+                    command.question,
+                    metadata=self._event_context(event),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"AI 总结问答失败: {exc}")
+                if cfg.show_error:
+                    await event.send(event.plain_result(f"AI问答失败：{exc}"))
+                self._stop_event(event)
+                return
+
+            if answer and not self._shutdown_event.is_set():
+                updated_record = self._append_qa_turn(
+                    scope_id,
+                    record,
+                    command.question,
+                    answer,
+                )
+                if updated_record is not None:
+                    record = updated_record
+                send_result = await event.send(
+                    event.plain_result(
+                        self._format_qa_message(
+                            answer,
+                            getattr(record, "record_id", ""),
+                        )
+                    )
+                )
+                self._remember_qa_reply(
+                    scope_id,
+                    getattr(record, "record_id", ""),
+                    send_result,
+                )
+                self._stop_event(event)
+        finally:
+            self._untrack_current_task(current_task)
+
+    @filter.event_message_type(EventMessageType.ALL)
     async def summarize_video(self, event: AstrMessageEvent):
         """Handle reply messages that request AI video summarization."""
-        if self._shutdown_event.is_set():
+        if self._shutdown_event.is_set() or self._is_event_stopped(event):
             return
         current_task = self._track_current_task()
         try:
@@ -189,6 +302,13 @@ class AISummaryPlugin(Star):
             if not cfg.permission.check(is_private, sender_id, group_id):
                 return
 
+            scope_id = qa_scope_id(is_private, sender_id, group_id)
+            if getattr(cfg, "qa_enabled", True) and self._record_id_for_replied_qa(
+                scope_id,
+                event,
+            ):
+                return
+
             requested_style = cfg.summary_style_for_text(text)
             summarize_reply = bool(cfg.reply_keyword_trigger and requested_style)
             self._debug(
@@ -200,6 +320,8 @@ class AISummaryPlugin(Star):
             if not summarize_reply:
                 return
 
+            self._ensure_qa_cleanup_task()
+            self._cleanup_qa_records()
             candidates: List[VideoCandidate] = []
             candidates.extend(await self._extract_reply_candidates(event))
 
@@ -236,17 +358,38 @@ class AISummaryPlugin(Star):
             async with self._semaphore:
                 results = await self._summarize_candidates(candidates)
 
-            messages: List[str] = []
+            outputs: List[tuple[str, Optional[Any]]] = []
             for metadata in results:
                 summary = str(metadata.get("ai_summary") or "").strip()
                 error = str(metadata.get("ai_summary_error") or "").strip()
                 if summary:
-                    messages.append(self._format_summary_message(summary))
+                    record = self._save_qa_record_from_summary(
+                        scope_id,
+                        metadata,
+                        summary,
+                        sender_id,
+                    )
+                    if record is not None:
+                        outputs.append((self._format_summary_message(summary), record))
+                    else:
+                        outputs.append((self._format_summary_message(summary), None))
                 elif cfg.show_error and error:
-                    messages.append(f"AI总结失败：{error}")
+                    outputs.append((f"AI总结失败：{error}", None))
 
-            if messages and not self._shutdown_event.is_set():
-                await self._send_summary_output(event, "\n\n".join(messages))
+            for message, record in outputs:
+                if self._shutdown_event.is_set():
+                    break
+                send_result = await self._send_summary_output(
+                    event,
+                    message,
+                    getattr(record, "record_id", "") if record is not None else "",
+                )
+                if record is not None:
+                    self._remember_qa_reply(
+                        scope_id,
+                        getattr(record, "record_id", ""),
+                        send_result,
+                    )
         finally:
             self._untrack_current_task(current_task)
 
@@ -254,14 +397,21 @@ class AISummaryPlugin(Star):
         self,
         event: AstrMessageEvent,
         message: str,
-    ) -> None:
+        record_id: str = "",
+    ) -> Any:
         """Send summary as text or rendered image according to output config."""
+        marker = qa_record_marker(record_id)
         if str(getattr(self.config, "send_format", "text") or "text") != "image":
-            await event.send(event.plain_result(message))
-            return
+            return await event.send(
+                event.plain_result(self._append_qa_marker(message, marker))
+            )
 
         image_ref = await self._render_summary_image(message)
-        await event.send(event.image_result(image_ref))
+        if not marker:
+            return await event.send(event.image_result(image_ref))
+        return await event.send(
+            event.chain_result([Image.fromFileSystem(image_ref), Plain(f"\n{marker}")])
+        )
 
     async def _render_summary_image(self, message: str) -> str:
         """Render final summary content with the plugin-owned local renderer."""
@@ -279,6 +429,247 @@ class AISummaryPlugin(Star):
         if str(getattr(self.config, "summary_format", "text") or "text") == "markdown":
             return text if text.startswith("# ") else f"# AI 视频总结\n\n{text}"
         return f"AI总结：\n{text}"
+
+    def _format_qa_message(self, answer: str, record_id: str = "") -> str:
+        """Format one QA answer for chat delivery."""
+        return self._append_qa_marker(
+            f"AI问答：\n{str(answer or '').strip()}",
+            qa_record_marker(record_id),
+        )
+
+    @staticmethod
+    def _append_qa_marker(message: str, marker: str) -> str:
+        """Append a stable quoted-reply marker without changing stored summaries."""
+        text = str(message or "").strip()
+        marker_text = str(marker or "").strip()
+        if not marker_text:
+            return text
+        return f"{text}\n\n{marker_text}" if text else marker_text
+
+    def _qa_request_for_event(
+        self,
+        event: AstrMessageEvent,
+        scope_id: str,
+    ) -> Optional[QARequest]:
+        """Return a QA request only when the user replies to a bound AI message."""
+        text = str(getattr(event, "message_str", "") or "").strip()
+        replied_record_id = self._record_id_for_replied_qa(scope_id, event)
+        if not text or not replied_record_id:
+            return None
+        return QARequest(question=text, record_id=replied_record_id)
+
+    def _record_id_for_replied_qa(
+        self,
+        scope_id: str,
+        event: AstrMessageEvent,
+    ) -> str:
+        """Return the QA record id bound to the replied plugin message."""
+        reply_ids = self._reply_message_ids(event)
+        bindings = getattr(self, "_qa_reply_bindings", {}).get(scope_id, {})
+        for reply_id in reply_ids:
+            record_id = str(bindings.get(reply_id, "") or "").strip()
+            if record_id:
+                return record_id
+        for reply_text in self._reply_message_texts(event):
+            record_id = qa_record_id_from_text(reply_text)
+            if record_id:
+                return record_id
+        return ""
+
+    def _remember_qa_reply(
+        self,
+        scope_id: str,
+        record_id: str,
+        send_result: Any = None,
+    ) -> None:
+        """Bind a sent plugin reply id to the selected summary record."""
+        scope = str(scope_id or "").strip()
+        if not scope:
+            return
+        message_id = self._extract_message_id(send_result)
+        if message_id:
+            bindings = getattr(self, "_qa_reply_bindings", None)
+            if bindings is None:
+                self._qa_reply_bindings = {}
+            self._qa_reply_bindings.setdefault(scope, {})[message_id] = str(
+                record_id or ""
+            ).strip()
+
+    def _handle_qa_control_command(self, text: str, scope_id: str) -> tuple[bool, str]:
+        """Handle QA context and knowledge cleanup commands."""
+        command = str(text or "").strip().lstrip("/").strip()
+        if command in set(getattr(self.config, "qa_exit_commands", ["结束", "退出"])):
+            return True, "已结束当前问答。"
+        if command in set(getattr(self.config, "qa_clear_commands", ["清理", "清空"])):
+            removed = self._clear_qa_knowledge(scope_id)
+            return True, f"已清理当前问答知识库（{removed} 条记录）。"
+        return False, ""
+
+    def _clear_qa_knowledge(self, scope_id: str) -> int:
+        """Delete all QA records and reply bindings for one scope."""
+        scope = str(scope_id or "").strip()
+        if scope:
+            getattr(self, "_qa_reply_bindings", {}).pop(scope, None)
+        return self.qa_store.delete_scope(scope_id)
+
+    def _reply_message_ids(self, event: AstrMessageEvent) -> set[str]:
+        """Return reply component ids present on an incoming message."""
+        ids: set[str] = set()
+        for comp in self._safe_get_messages(event):
+            if comp.__class__.__name__.lower() != "reply":
+                continue
+            for attr in ("id", "message_id", "msg_id"):
+                value = str(getattr(comp, attr, "") or "").strip()
+                if value:
+                    ids.add(value)
+        return ids
+
+    def _reply_message_texts(self, event: AstrMessageEvent) -> List[str]:
+        """Return quoted message text fragments that may contain QA record markers."""
+        texts: List[str] = []
+        for comp in self._safe_get_messages(event):
+            if comp.__class__.__name__.lower() != "reply":
+                continue
+            for attr in ("message_str", "text"):
+                value = str(getattr(comp, attr, "") or "").strip()
+                if value:
+                    texts.append(value)
+            chain = getattr(comp, "chain", None)
+            if isinstance(chain, list):
+                for item in chain:
+                    value = str(getattr(item, "text", "") or "").strip()
+                    if value:
+                        texts.append(value)
+        return texts
+
+    @staticmethod
+    def _stop_event(event: AstrMessageEvent) -> None:
+        """Stop later handlers after this plugin has handled a QA event."""
+        stopper = getattr(event, "stop_event", None)
+        if callable(stopper):
+            stopper()
+
+    @staticmethod
+    def _is_event_stopped(event: AstrMessageEvent) -> bool:
+        """Return whether an earlier handler already stopped this event."""
+        checker = getattr(event, "is_stopped", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _extract_message_id(value: Any) -> str:
+        """Best-effort extraction of a sent message id from platform results."""
+        if value is None:
+            return ""
+        if isinstance(value, (str, int)):
+            return str(value).strip()
+        if isinstance(value, dict):
+            for key in ("message_id", "msg_id", "id"):
+                text = str(value.get(key, "") or "").strip()
+                if text:
+                    return text
+            data = value.get("data")
+            if data is not value:
+                return AISummaryPlugin._extract_message_id(data)
+            return ""
+        for attr in ("message_id", "msg_id", "id"):
+            text = str(getattr(value, attr, "") or "").strip()
+            if text:
+                return text
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                text = AISummaryPlugin._extract_message_id(item)
+                if text:
+                    return text
+        return ""
+
+    def _cleanup_qa_records(self) -> None:
+        """Remove QA records that have not been accessed within the configured TTL."""
+        if not getattr(self.config, "qa_enabled", True):
+            return
+        try:
+            removed = self.qa_store.cleanup_expired()
+        except Exception as exc:
+            logger.warning(f"AI 总结问答知识库清理失败: {exc}")
+            return
+        if removed:
+            self._debug("问答知识库清理完成: removed=%d", removed)
+
+    def _ensure_qa_cleanup_task(self) -> None:
+        """Start periodic QA cleanup once an event loop is available."""
+        if not getattr(self.config, "qa_enabled", True):
+            return
+        if int(getattr(self.config, "qa_record_ttl_minutes", 30) or 0) <= 0:
+            return
+        if self._qa_cleanup_task is not None and not self._qa_cleanup_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._qa_cleanup_task = loop.create_task(self._qa_cleanup_loop())
+
+    async def _qa_cleanup_loop(self) -> None:
+        """Periodically enforce the idle TTL for saved summary knowledge records."""
+        while not self._shutdown_event.is_set():
+            await asyncio.sleep(60)
+            self._cleanup_qa_records()
+
+    def _save_qa_record_from_summary(
+        self,
+        scope_id: str,
+        metadata: Dict[str, Any],
+        summary: str,
+        sender_id: Any,
+    ) -> Optional[Any]:
+        """Persist a successful first-pass summary as a QA knowledge record."""
+        if not getattr(self.config, "qa_enabled", True):
+            return None
+        text = str(summary or "").strip()
+        if not text:
+            return None
+        try:
+            return self.qa_store.save_record(
+                scope_id=scope_id,
+                summary=text,
+                source=str(metadata.get("url") or metadata.get("source") or "").strip(),
+                summary_style=str(
+                    metadata.get("_ai_summary_effective_style")
+                    or metadata.get("summary_style")
+                    or ""
+                ).strip(),
+                sender_id=str(sender_id or "").strip(),
+            )
+        except Exception as exc:
+            logger.warning(f"AI 总结问答知识库保存失败: {exc}")
+            return None
+
+    def _append_qa_turn(
+        self,
+        scope_id: str,
+        record: Any,
+        question: str,
+        answer: str,
+    ) -> Optional[Any]:
+        """Persist one completed QA pair onto the selected summary record."""
+        record_id = str(getattr(record, "record_id", "") or "").strip()
+        if not record_id:
+            return None
+        try:
+            return self.qa_store.append_qa_turn(
+                scope_id,
+                record_id,
+                question=question,
+                answer=answer,
+                max_turns=int(getattr(self.config, "qa_history_turns", 5) or 0),
+            )
+        except Exception as exc:
+            logger.warning(f"AI 总结问答历史保存失败: {exc}")
+            return None
 
     async def _summarize_candidates(
         self,

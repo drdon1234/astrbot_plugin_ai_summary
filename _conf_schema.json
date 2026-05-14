@@ -35,6 +35,48 @@
             }
         }
     },
+    "qa": {
+        "description": "总结问答",
+        "type": "object",
+        "hint": "首次总结结果会作为临时知识库；私聊和群聊都通过引用带问答ID的插件总结或问答回复来提问；终止和清理命令可配置",
+        "items": {
+            "enable": {
+                "description": "启用总结问答",
+                "type": "bool",
+                "default": true
+            },
+            "exit_commands": {
+                "description": "终止问答命令",
+                "type": "list",
+                "hint": "发送这些命令会结束本轮问答，但不会删除已保存知识库或引用绑定",
+                "default": [
+                    "结束",
+                    "退出"
+                ]
+            },
+            "clear_commands": {
+                "description": "清理记忆命令",
+                "type": "list",
+                "hint": "发送这些命令会删除当前私聊或群聊 scope 下的问答知识库和短对话记忆",
+                "default": [
+                    "清理",
+                    "清空"
+                ]
+            },
+            "record_ttl_minutes": {
+                "description": "知识库空闲清理时间（分钟）",
+                "type": "int",
+                "hint": "按最后检索时间计算；默认 30 分钟未检索就删除，0 表示不自动清理",
+                "default": 30
+            },
+            "history_turns": {
+                "description": "短对话记忆轮数",
+                "type": "int",
+                "hint": "每个视频记录最近 N 轮问答并作为连续追问上下文；默认 5，0 表示不保留问答历史",
+                "default": 5
+            }
+        }
+    },
     "llm": {
         "description": "大模型接口",
         "type": "object",

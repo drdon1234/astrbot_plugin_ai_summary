@@ -22,6 +22,8 @@ from .asr_runtime import (
 )
 from .llm_client import LLMClient
 from .prompts import (
+    DEFAULT_QA_SYSTEM_PROMPT,
+    DEFAULT_QA_USER_PROMPT,
     DEFAULT_STYLE_PROMPTS,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_VISION_DECISION_PROMPT,
@@ -680,6 +682,84 @@ class AISummaryManager:
             metadata=metadata,
         )
         return await self._postprocess_summary(summary, transcript, metadata)
+
+    async def answer_summary_question(
+        self,
+        record: Any,
+        question: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Answer a question using a saved summary plus recent QA turns."""
+        metadata = metadata or {}
+        missing = self._missing_llm_fields(metadata)
+        if missing:
+            raise RuntimeError("未配置 AI 问答接口: " + "、".join(missing))
+
+        summary = str(getattr(record, "summary", "") or "").strip()
+        question_text = str(question or "").strip()
+        history_text = self._format_qa_history(
+            getattr(record, "qa_history", []),
+            int(getattr(self.config, "qa_history_turns", 5) or 0),
+        )
+        if not summary:
+            return "当前没有可用的视频上下文，请先完成一次视频总结。"
+        if not question_text:
+            return "请提供要询问的问题。"
+
+        payload: Dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": DEFAULT_QA_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": DEFAULT_QA_USER_PROMPT.format(
+                        summary=summary,
+                        history=history_text,
+                        question=question_text,
+                    ),
+                },
+            ],
+            "temperature": min(
+                float(getattr(self.config, "temperature", 0.2) or 0.2),
+                0.3,
+            ),
+            "max_completion_tokens": min(
+                max(
+                    int(getattr(self.config, "max_completion_tokens", 600) or 600),
+                    256,
+                ),
+                1000,
+            ),
+        }
+        answer = await self._post_chat_completion(
+            payload,
+            timeout_seconds=self.config.request_timeout_seconds,
+            metadata=metadata,
+        )
+        text = str(answer or "").strip()
+        return text or "我暂时无法生成有效回答，请稍后重试。"
+
+    @staticmethod
+    def _format_qa_history(history: Any, max_turns: int) -> str:
+        """Format recent question-answer turns for the QA prompt."""
+        limit = max(0, min(int(max_turns or 0), 20))
+        if limit <= 0 or not isinstance(history, list):
+            return "（无）"
+        normalized: List[Dict[str, str]] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question", "") or "").strip()
+            answer = str(item.get("answer", "") or "").strip()
+            if question and answer:
+                normalized.append({"question": question, "answer": answer})
+        if not normalized:
+            return "（无）"
+        lines: List[str] = []
+        for index, turn in enumerate(normalized[-limit:], start=1):
+            lines.append(f"Q{index}：{turn['question']}")
+            lines.append(f"A{index}：{turn['answer']}")
+        return "\n".join(lines)
 
     async def test_llm_connectivity(
         self,
