@@ -7,12 +7,11 @@ import re
 from pathlib import Path
 from typing import List
 
-_LOCAL_FONT_PATH = (
-    Path(__file__).resolve().parent.parent /
-    "resource" /
-    "font" /
-    "arialuni.ttf"
-)
+_FONT_DIR = Path(__file__).resolve().parent.parent / "resource" / "font"
+_LOCAL_FONT_PATH = _FONT_DIR / "NotoSansCJKsc-Regular.otf"
+_LOCAL_BOLD_FONT_PATH = _FONT_DIR / "NotoSansCJKsc-Bold.otf"
+_DEFAULT_CANVAS_WIDTH = 960
+_MIN_CANVAS_WIDTH = 760
 
 
 async def render_summary_image_file(
@@ -20,7 +19,7 @@ async def render_summary_image_file(
     content_format: str,
     output_path: str,
     *,
-    width: int = 1400,
+    width: int = _DEFAULT_CANVAS_WIDTH,
     timeout_seconds: int = 60,
 ) -> str:
     """Render a summary to a PNG file using the bundled Pillow font path."""
@@ -30,7 +29,7 @@ async def render_summary_image_file(
         text,
         content_format,
         output,
-        width=max(800, int(width or 1400)),
+        width=max(_MIN_CANVAS_WIDTH, int(width or _DEFAULT_CANVAS_WIDTH)),
         timeout_seconds=timeout_seconds,
     )
     return _validated_output_path(output)
@@ -74,14 +73,14 @@ def _render_text_image_file_sync(
     except ImportError as exc:
         raise RuntimeError("缺少 Pillow，无法生成总结图片") from exc
 
-    canvas_width = max(800, int(width or 1400))
-    margin_x = max(42, canvas_width // 24)
+    canvas_width = max(_MIN_CANVAS_WIDTH, int(width or _DEFAULT_CANVAS_WIDTH))
+    margin_x = max(34, canvas_width // 24)
     content_width = canvas_width - margin_x * 2
 
-    title_font = _load_pillow_font(ImageFont, 38, bold=True)
-    heading_font = _load_pillow_font(ImageFont, 28, bold=True)
-    subheading_font = _load_pillow_font(ImageFont, 24, bold=True)
-    body_font = _load_pillow_font(ImageFont, 23)
+    title_font = _load_pillow_font(ImageFont, 40, bold=True)
+    heading_font = _load_pillow_font(ImageFont, 30, bold=True)
+    subheading_font = _load_pillow_font(ImageFont, 26, bold=True)
+    body_font = _load_pillow_font(ImageFont, 25)
 
     probe = Image.new("RGB", (canvas_width, 200), "#f4f7f2")
     draw = ImageDraw.Draw(probe)
@@ -92,9 +91,9 @@ def _render_text_image_file_sync(
     subheading_line_height = _line_height(draw, subheading_font, 1.28)
     body_line_height = _line_height(draw, body_font, 1.45)
 
-    hero_height = 56 + len(title_lines) * title_line_height + 46
+    hero_height = 48 + len(title_lines) * title_line_height + 42
     section_layouts = []
-    total_height = hero_height + 32
+    total_height = hero_height + 26
     for index, section in enumerate(sections):
         layout, height = _measure_text_image_section(
             draw,
@@ -108,13 +107,13 @@ def _render_text_image_file_sync(
             body_line_height,
         )
         section_layouts.append((index, layout, height))
-        total_height += height + 18
-    total_height += 28
+        total_height += height + 16
+    total_height += 18
 
-    image = Image.new("RGB", (canvas_width, max(640, total_height)), "#f4f7f2")
+    image = Image.new("RGB", (canvas_width, total_height), "#f4f7f2")
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, canvas_width, hero_height), fill="#edf4f1")
-    y = 42
+    y = 36
     for line in title_lines:
         line_width = _text_width(draw, line, title_font)
         draw.text(
@@ -136,7 +135,7 @@ def _render_text_image_file_sync(
         fill="#5f9388",
     )
 
-    y = hero_height + 28
+    y = hero_height + 24
     accents = ["#6a8fb7", "#5f9388", "#b07aa1", "#d28b52", "#4f9aa3", "#c06f7c"]
     for index, layout, height in section_layouts:
         x0 = margin_x
@@ -152,7 +151,7 @@ def _render_text_image_file_sync(
         accent = accents[index % len(accents)]
         draw.rounded_rectangle((x0, y, x0 + 6, y1), radius=3, fill=accent)
         content_x = x0 + 28
-        content_y = y + 22
+        content_y = y + 20
         content_y = _draw_text_image_section(
             draw,
             layout,
@@ -167,7 +166,7 @@ def _render_text_image_file_sync(
             body_line_height,
             accent,
         )
-        y = y1 + 18
+        y = y1 + 16
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(output_path, format="PNG")
@@ -359,9 +358,10 @@ def _line_height(draw: object, font: object, factor: float) -> int:
 
 
 def _load_pillow_font(image_font: object, size: int, *, bold: bool = False) -> object:
-    if not _LOCAL_FONT_PATH.is_file():
-        raise RuntimeError(f"本地字体文件不存在: {_LOCAL_FONT_PATH}")
+    font_path = _LOCAL_BOLD_FONT_PATH if bold else _LOCAL_FONT_PATH
+    if not font_path.is_file():
+        raise RuntimeError(f"本地字体文件不存在: {font_path}")
     try:
-        return image_font.truetype(str(_LOCAL_FONT_PATH), size)  # type: ignore[attr-defined]
+        return image_font.truetype(str(font_path), size)  # type: ignore[attr-defined]
     except Exception as exc:
-        raise RuntimeError(f"加载本地字体失败: {_LOCAL_FONT_PATH}") from exc
+        raise RuntimeError(f"加载本地字体失败: {font_path}") from exc

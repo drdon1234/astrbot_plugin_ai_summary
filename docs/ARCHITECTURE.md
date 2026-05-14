@@ -78,8 +78,8 @@ core/
 输出渲染层，负责：
 
 - 使用 Pillow 将纯文本或常见 Markdown 结构绘制为温和浅色单列卡片 PNG
-- 固定加载插件本地 `resource/font/arialuni.ttf` 字体文件，避免依赖系统中文字体
-- 不依赖 `imgkit`、`wkhtmltoimage` 或 AstrBot 内置截图渲染器
+- 固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，避免依赖系统中文字体
+- 不依赖外部截图渲染器
 
 ### `core/summary/manager.py`
 

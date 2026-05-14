@@ -9,7 +9,7 @@ _✨ 自动转写视频内容并生成总结 ✨_
 [![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-orange.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/Version-v0.1.3-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
+[![Version](https://img.shields.io/badge/Version-v0.1.4-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
 [![GitHub](https://img.shields.io/badge/作者-drdon1234-blue)](https://github.com/drdon1234)
 
 </div>
@@ -35,7 +35,7 @@ _✨ 自动转写视频内容并生成总结 ✨_
 7. 总结、视觉判断和视觉分析均使用内置提示词，WebUI 不再暴露自定义提示词入口。
 8. 总结模式由触发命令决定：`总结一下` / `总结视频` 为自动，`简略总结` / `简单总结` 为简略，`专业总结` / `详细总结` 为专业。
 
-图片发送模式使用 Pillow 直接把总结内容绘制为温和浅色卡片图片，并固定加载插件本地 `resource/font/arialuni.ttf` 字体文件，不依赖浏览器截图环境或系统字体。
+图片发送模式使用 Pillow 直接把总结内容绘制为温和浅色卡片图片，并固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，不依赖浏览器截图环境或系统字体。
 
 ---
 
