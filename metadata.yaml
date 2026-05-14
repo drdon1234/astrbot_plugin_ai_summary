@@ -1,5 +1,5 @@
 name: astrbot_plugin_ai_summary
 desc: 基于本地语音转写，结合用户提示词与视觉信息的多模态 AI 视频总结工具
-version: v0.1.4
+version: v0.1.5
 author: drdon1234
 repo: https://github.com/drdon1234/astrbot_plugin_ai_summary
