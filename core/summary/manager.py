@@ -21,6 +21,12 @@ from .asr_runtime import (
     AsrRuntimeStateStore,
 )
 from .llm_client import LLMClient
+from .prompts import (
+    DEFAULT_STYLE_PROMPTS,
+    DEFAULT_SUMMARY_SYSTEM_PROMPT,
+    DEFAULT_VISION_DECISION_PROMPT,
+    DEFAULT_VISUAL_ANALYSIS_PROMPT,
+)
 
 
 def _log_cleanup_error(action: str, exc: Exception) -> None:
@@ -30,6 +36,56 @@ def _log_cleanup_error(action: str, exc: Exception) -> None:
 
 class AISummaryManager:
     """Generate summaries for prepared video records."""
+
+    _AUTO_PROFESSIONAL_KEYWORDS = (
+        "财经",
+        "金融",
+        "投资",
+        "上市",
+        "融资",
+        "股权",
+        "债务",
+        "估值",
+        "商业",
+        "公司",
+        "企业",
+        "政策",
+        "案例",
+        "复盘",
+        "争议",
+        "新闻",
+        "科普",
+        "教程",
+        "方法",
+        "技术",
+        "模型",
+        "开发者",
+        "成本",
+        "风险",
+        "数据",
+        "研究",
+        "market",
+        "model",
+        "developer",
+        "cost",
+        "benchmark",
+        "api",
+        "company",
+        "business",
+        "risk",
+        "research",
+    )
+    _AUTO_LOW_INFO_KEYWORDS = (
+        "bgm",
+        "歌词",
+        "纯音乐",
+        "舞蹈",
+        "跳舞",
+        "游戏对局",
+        "擦边",
+        "展示",
+        "水印",
+    )
 
     _REPAIR_SYSTEM_PROMPT = (
         "你是视频总结格式修复器。只修复已有总结的输出格式，"
@@ -587,14 +643,24 @@ class AISummaryManager:
         if missing:
             raise RuntimeError("未配置 AI 总结接口: " + "、".join(missing))
 
+        effective_style = self._effective_summary_style(
+            transcript,
+            visual,
+            visual_decision or {},
+            metadata,
+        )
+        metadata["_ai_summary_effective_style"] = effective_style
         prompt = self._render_prompt(
             metadata,
             transcript,
             visual,
             visual_decision or {},
+            effective_style,
         )
         self._debug(
-            "总结Prompt准备完成: transcript_chars=%d visual_chars=%d prompt_chars=%d",
+            "总结Prompt准备完成: configured_style=%s effective_style=%s transcript_chars=%d visual_chars=%d prompt_chars=%d",
+            self._configured_summary_style(metadata),
+            effective_style,
             len(transcript),
             len(visual),
             len(prompt),
@@ -602,7 +668,7 @@ class AISummaryManager:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": self._summary_system_prompt(effective_style)},
                 {"role": "user", "content": prompt},
             ],
             "temperature": self.config.temperature,
@@ -657,6 +723,121 @@ class AISummaryManager:
             configured = 30
         return min(max(10, configured), 60)
 
+    def _summary_system_prompt(self, summary_style: Optional[str] = None) -> str:
+        """Return the final summary system prompt with output-format constraints."""
+        prompt = DEFAULT_SUMMARY_SYSTEM_PROMPT
+        prompt = self._adapt_prompt_to_summary_format(prompt)
+        return f"{prompt}\n\n{self._summary_format_instruction(summary_style)}".strip()
+
+    def _summary_format_instruction(self, summary_style: Optional[str] = None) -> str:
+        """Describe the configured final summary content format for the LLM."""
+        if self._summary_format() == "markdown":
+            style = summary_style or self._configured_summary_style()
+            if style == "brief":
+                return (
+                    "本次最终总结必须输出简洁 Markdown。第一行必须是唯一的 h1 标题，"
+                    "标题应直接概括视频主题；标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
+                    "不要使用“##”二级章节、表格、固定栏目、代码块或 HTML；不要输出“关键总结”“事件脉络”"
+                    "“视频脉络”“主体关系”“经验启示”“应对建议”等章节。"
+                )
+            return (
+                "本次最终总结必须输出结构化 Markdown。第一行必须是唯一的 h1 标题，"
+                "标题本身承担主题概括，不要再输出“主题”章节；后续使用"
+                "“## 章节标题”拆分内容板块，每个板块聚焦一个内容面向。专业总结优先包含"
+                "“关键总结”“事件脉络”或“视频脉络”“主体关系”“AI 总结”等板块。"
+                "不要输出“主题”“总览”或“关键数字”章节；重要背景和数字必须在相关结论或脉络中解释清楚。"
+                "“经验启示”只有在视频确实提供可迁移经验、风险教训或决策启发时才输出，"
+                "不要为了固定格式强行添加。如果语音转写中带有 [mm:ss-mm:ss] 时间段，"
+                "可以在事件脉络或视频脉络中保留对应起始时间点；没有时间段时不要编造时间戳。"
+                "可以使用列表、加粗、引用和表格，但不要把整段结果包裹在代码块中，不要输出 HTML。"
+            )
+        return (
+            "本次最终总结必须输出纯文本。不要使用 Markdown 标题、表格、代码块或 HTML。"
+        )
+
+    def _summary_format(self) -> str:
+        value = str(getattr(self.config, "summary_format", "text") or "text")
+        return "markdown" if value.casefold() == "markdown" else "text"
+
+    def _configured_summary_style(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        if isinstance(metadata, dict):
+            value = str(metadata.get("summary_style", "") or "").casefold()
+            if value in {"auto", "brief", "professional"}:
+                return value
+        return "auto"
+
+    def _effective_summary_style(
+        self,
+        transcript: str,
+        visual: str = "",
+        visual_decision: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Return the actual prompt style used for this summary request."""
+        configured = self._configured_summary_style(metadata)
+        if configured != "auto":
+            return configured
+        return self._auto_summary_style(transcript, visual, visual_decision or {})
+
+    def _auto_summary_style(
+        self,
+        transcript: str,
+        visual: str,
+        visual_decision: Dict[str, Any],
+    ) -> str:
+        """Choose brief or professional mode from input density and structure."""
+        quality = str(visual_decision.get("transcript_quality", "") or "").casefold()
+        plain_transcript = self._strip_transcript_timestamps(transcript)
+        combined = f"{plain_transcript}\n{visual}".casefold()
+        transcript_chars = len(plain_transcript.strip())
+        segment_count = len(re.findall(r"\[\d{2}:\d{2}-\d{2}:\d{2}\]", transcript))
+        number_count = len(re.findall(r"\d+(?:\.\d+)?(?:%|％)?", plain_transcript))
+        professional_hits = sum(
+            1 for keyword in self._AUTO_PROFESSIONAL_KEYWORDS
+            if keyword.casefold() in combined
+        )
+        low_info_hits = sum(
+            1 for keyword in self._AUTO_LOW_INFO_KEYWORDS
+            if keyword.casefold() in combined
+        )
+        visual_high_density = "信息密度：高" in visual or "信息密度: 高" in visual
+
+        if quality in {"empty", "low"} and transcript_chars < 1200 and not visual_high_density:
+            return "brief"
+        if transcript_chars >= 1800 or segment_count >= 6:
+            return "professional"
+        if transcript_chars >= 900 and (number_count >= 5 or professional_hits >= 2):
+            return "professional"
+        if visual_high_density and transcript_chars >= 500:
+            return "professional"
+        if low_info_hits and professional_hits == 0:
+            return "brief"
+        return "brief"
+
+    @staticmethod
+    def _strip_transcript_timestamps(transcript: str) -> str:
+        return re.sub(r"\[\d{2}:\d{2}-\d{2}:\d{2}\]\s*", "", str(transcript or ""))
+
+    def _summary_prompt_for_style(self, summary_style: str) -> str:
+        return DEFAULT_STYLE_PROMPTS.get(summary_style, DEFAULT_STYLE_PROMPTS["brief"])
+
+    def _adapt_prompt_to_summary_format(self, prompt: str) -> str:
+        """Remove default plain-text wording when Markdown output is selected."""
+        if self._summary_format() != "markdown":
+            return prompt
+        text = str(prompt or "")
+        replacements = {
+            "输出纯文本，适合在聊天消息中阅读。": "",
+            "输出纯文本，只输出": "输出 Markdown，只输出",
+            "输出纯文本": "输出 Markdown",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        return text
+
     async def _decide_visual_fallback(
         self,
         metadata: Dict[str, Any],
@@ -680,7 +861,7 @@ class AISummaryManager:
             return decision
 
         prompt = self._render_template(
-            self.config.vision_decision_prompt,
+            DEFAULT_VISION_DECISION_PROMPT,
             metadata,
             transcript,
             "",
@@ -689,7 +870,7 @@ class AISummaryManager:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": DEFAULT_SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0,
@@ -1121,7 +1302,7 @@ class AISummaryManager:
             "2. 保留整理后的总结判断，不改变主要结论。\n"
             "3. 不确定内容必须在正文对应句子后使用“〔疑1〕”“〔疑2〕”等编号标记。\n"
             "4. 如果正文使用了编号标记，末尾添加“注释：”并逐条说明每个编号需要核对的原因；没有编号标记则不要写注释。\n"
-            "5. 输出纯文本，只输出修复后的总结。\n\n"
+            f"5. {self._summary_repair_format_instruction()}\n\n"
             "需要修复的问题：\n"
             f"{issue_text}\n\n"
             "待修复总结：\n"
@@ -1147,6 +1328,11 @@ class AISummaryManager:
             ),
             metadata=metadata,
         )
+
+    def _summary_repair_format_instruction(self) -> str:
+        if self._summary_format() == "markdown":
+            return "输出 Markdown，只输出修复后的总结，不要包裹代码块，不要输出 HTML。"
+        return "输出纯文本，只输出修复后的总结。"
 
     @classmethod
     def _clean_summary_output(
@@ -1222,7 +1408,7 @@ class AISummaryManager:
     def _is_summary_heading(line: str) -> bool:
         return bool(
             re.match(
-                r"^(?:主题|概要|关键事件|关键数字|主体关系|结论|注释|总结)\s*[:：]",
+                r"^(?:主题|概要|关键总结|关键事件|事件脉络|视频脉络|主体关系|经验启示|结论|注释|总结)\s*[:：]",
                 line,
             )
         )
@@ -1573,7 +1759,7 @@ class AISummaryManager:
             [round(timestamp, 2) for _, timestamp in frames],
         )
         prompt = self._render_template(
-            self.config.visual_analysis_prompt,
+            DEFAULT_VISUAL_ANALYSIS_PROMPT,
             metadata,
             transcript[: min(len(transcript), 4000)],
             "",
@@ -1595,7 +1781,7 @@ class AISummaryManager:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": self.config.system_prompt},
+                {"role": "system", "content": DEFAULT_SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": content},
             ],
             "temperature": self.config.temperature,
@@ -1649,15 +1835,24 @@ class AISummaryManager:
         transcript: str,
         visual: str = "",
         visual_decision: Optional[Dict[str, Any]] = None,
+        summary_style: Optional[str] = None,
     ) -> str:
         """Render the selected summary prompt with transcript and visual context."""
-        return self._render_template(
-            self.config.selected_prompt,
+        effective_style = summary_style or self._effective_summary_style(
+            transcript,
+            visual,
+            visual_decision or {},
+            metadata,
+        )
+        prompt = self._render_template(
+            self._summary_prompt_for_style(effective_style),
             metadata,
             transcript,
             visual,
             visual_decision or {},
         )
+        prompt = self._adapt_prompt_to_summary_format(prompt)
+        return f"{prompt.rstrip()}\n\n{self._summary_format_instruction(effective_style)}"
 
     def _render_template(
         self,

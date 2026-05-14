@@ -8,7 +8,7 @@
 
 它有两条主要入口：
 
-1. 普通消息总结流程：基于关键词触发，要求引用含视频的消息。
+1. 普通消息总结流程：基于总结命令触发，要求引用含视频的消息。
 2. 管理员连通性测试流程：基于可配置关键词触发，只允许私聊中的 `permissions.admin_id` 对应账号使用。
 
 核心链路如下：
@@ -41,6 +41,7 @@ flowchart TD
 main.py
 core/
   config.py
+  output_render.py
   logger.py
   summary/
     __init__.py
@@ -69,8 +70,16 @@ core/
 配置解析层，负责：
 
 - 把 AstrBot WebUI 配置转换成 `AISummaryConfig`
-- 解析触发器、LLM、权限、提示词、输出控制和管理员调试配置
+- 解析触发器、LLM、权限、输出控制和管理员调试配置
 - 生成插件运行所需的默认缓存路径
+
+### `core/output_render.py`
+
+输出渲染层，负责：
+
+- 使用 Pillow 将纯文本或常见 Markdown 结构绘制为温和浅色单列卡片 PNG
+- 固定加载插件本地 `resource/font/arialuni.ttf` 字体文件，避免依赖系统中文字体
+- 不依赖 `imgkit`、`wkhtmltoimage` 或 AstrBot 内置截图渲染器
 
 ### `core/summary/manager.py`
 
@@ -99,28 +108,37 @@ core/
 - 必要时自动安装 `requirements-asr.txt`
 - 管理 ASR 模型下载状态和持久化状态
 
+### `core/summary/asr_worker.py`
+
+ASR 子进程执行层，负责：
+
+- 加载 FunASR ASR/VAD 模型并执行音频转写
+- 保留可读的 `plain_text`
+- 在模型返回词级 timestamp 时生成约 25 秒一段的 `segments`
+- 将带 `[mm:ss-mm:ss]` 的分段文本写入 `text`，供专业 Markdown 总结提取时间点
+
 ### `core/summary/prompts.py`
 
 提示词层，负责：
 
 - 提供默认总结系统提示词
-- 提供自动 / 简略 / 专业三种风格模板
+- 提供简略 / 专业两种总结模板；自动模式在运行时根据信息密度路由到其中一种
 - 提供视觉兜底判断和视觉分析提示词
-- 作为配置未覆盖时的默认模板来源
+- 作为插件唯一内置提示词来源，WebUI 不再暴露自定义提示词入口
 
 ## 3. 请求流
 
 ### 3.1 普通总结流程
 
 1. `main.py` 接收消息事件。
-2. 判断是否命中总结关键词。
+2. 判断是否命中自动 / 简略 / 专业任一总结命令，并记录本次请求的总结模式。
 3. 用 `permissions` 做访问控制。
 4. 从引用消息中提取视频源，并去重；没有视频候选时流程结束。
-5. 确认存在视频候选后，如果消息文本中除总结关键词外还有内容，会提取为可选的 `user_hint`。
+5. 确认存在视频候选后，如果消息文本中除总结命令外还有内容，会提取为可选的 `user_hint`。
 6. 下载视频到 `cache_dir/downloads/`。
 7. 把候选元数据交给 `AISummaryManager`。
 8. `AISummaryManager` 先转写，再按需要做视觉兜底。
-9. 总结 prompt 会携带可选 `user_hint`、转写内容和视觉内容。
+9. 总结 prompt 会携带可选 `user_hint`、转写内容和视觉内容；当 ASR 返回 timestamp 时，转写内容会带时间段，方便最终专业总结保留关键时间点。
 10. 生成总结并回发给消息平台。
 
 ### 3.2 管理员连通性测试流程
@@ -167,12 +185,13 @@ sequenceDiagram
 
 ### `trigger`
 
-- `reply_keyword_trigger`：是否开启“引用 + 关键词”触发
-- `keywords`：总结关键词列表
+- `reply_keyword_trigger`：是否开启“引用 + 命令”触发
+- `auto_keywords`：自动总结命令列表，默认 `总结一下` / `总结视频`
+- `brief_keywords`：简略总结命令列表，默认 `简略总结` / `简单总结`
+- `professional_keywords`：专业总结命令列表，默认 `专业总结` / `详细总结`
 
 ### `基础质量`
 
-- `summary.style`：默认总结风格，映射到 `auto` / `brief` / `professional`
 - `summary.max_completion_tokens`：总结最大输出长度
 - `summary.temperature`：总结随机性
 - `summary.max_transcript_chars`：进入总结提示词的转写文本上限
@@ -195,25 +214,22 @@ sequenceDiagram
 - `asr.sample_rate`：音频采样率
 - `asr.asr_timeout_seconds`：音频提取和转写超时时间
 
-### `prompts`
+### 内置提示词
 
-提示词变量：
+总结、视觉兜底判断和视觉分析提示词由 `core/summary/prompts.py` 统一提供，不再通过 WebUI 暴露自定义提示词入口。
 
-- `{user_hint}`：用户在触发关键词之外附加的提示
+内置模板变量：
+
+- `{user_hint}`：用户在触发命令之外附加的提示
 - `{transcript}`：语音转写文本
 - `{visual}`：视觉兜底判定和视觉观察
 - `{frame_notes}`：视觉分析抽样帧说明，仅视觉分析提示词使用
 
-- `system_prompt`：总结时使用的系统提示词，留空使用内置默认
-- `auto_prompt`：自动风格总结提示词，留空使用内置默认
-- `brief_prompt`：简略风格总结提示词，留空使用内置默认
-- `professional_prompt`：专业风格总结提示词，留空使用内置默认
-- `vision_decision_prompt`：视觉兜底判断提示词，留空使用内置默认
-- `visual_analysis_prompt`：视觉分析提示词，留空使用内置默认
-
 ### `output`
 
 - `status_message`：是否发送处理中提示
+- `summary_format`：最终总结内容格式，可选纯文本或 Markdown
+- `send_format`：最终回复发送格式，可选文本或图片；图片模式通过 Pillow 和插件本地字体生成温和浅色单列卡片图片
 - `show_error`：是否回显失败原因
 - `enable_summary_repair`：是否在最终回复前启用格式修复，默认清理原始转写泄漏、非标准核对标记和不一致的不确定性注释
 
@@ -229,6 +245,7 @@ sequenceDiagram
 - `cache_dir`：插件根缓存目录
 - `cache_dir/runtime/`：运行时状态目录
 - `cache_dir/downloads/`：视频下载目录
+- `cache_dir/runtime/images/`：图片发送模式生成的临时总结图片目录
 - `cache_dir/runtime/summary_tmp/`：临时音频、转写和视觉分析目录
 
 运行时状态主要包括：
@@ -251,6 +268,7 @@ sequenceDiagram
 - AstrBot API
 - `aiohttp`
 - `ffmpeg`
+- Pillow：仅图片发送模式需要；直接执行文本转图片，不依赖浏览器截图环境
 
 ### ASR 相关依赖
 

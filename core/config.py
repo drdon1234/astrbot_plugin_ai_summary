@@ -7,13 +7,6 @@ from typing import Any, Dict, List
 
 from astrbot.api.star import StarTools
 
-from .summary.prompts import (
-    DEFAULT_STYLE_PROMPTS,
-    DEFAULT_SUMMARY_SYSTEM_PROMPT,
-    DEFAULT_VISUAL_ANALYSIS_PROMPT,
-    DEFAULT_VISION_DECISION_PROMPT,
-    SUMMARY_STYLE_OPTIONS,
-)
 from .summary.llm_provider_defs import (
     LLM_PROVIDER_DEFAULTS,
     LLM_PROVIDER_OPTIONS,
@@ -21,6 +14,9 @@ from .summary.llm_provider_defs import (
 
 
 PLUGIN_NAME = "astrbot_plugin_ai_summary"
+DEFAULT_AUTO_KEYWORDS = ["总结一下", "总结视频"]
+DEFAULT_BRIEF_KEYWORDS = ["简略总结", "简单总结"]
+DEFAULT_PROFESSIONAL_KEYWORDS = ["专业总结", "详细总结"]
 
 
 def _default_cache_dir() -> str:
@@ -75,16 +71,11 @@ class AISummaryConfig:
     model: str = "gpt-5.5"
     api_version: str = ""
     reply_keyword_trigger: bool = True
-    keywords: List[str] = field(
-        default_factory=lambda: ["总结视频", "视频总结", "总结一下"]
+    auto_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_AUTO_KEYWORDS))
+    brief_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_BRIEF_KEYWORDS))
+    professional_keywords: List[str] = field(
+        default_factory=lambda: list(DEFAULT_PROFESSIONAL_KEYWORDS)
     )
-    style: str = "auto"
-    system_prompt: str = DEFAULT_SUMMARY_SYSTEM_PROMPT
-    prompts: Dict[str, str] = field(
-        default_factory=lambda: dict(DEFAULT_STYLE_PROMPTS)
-    )
-    vision_decision_prompt: str = DEFAULT_VISION_DECISION_PROMPT
-    visual_analysis_prompt: str = DEFAULT_VISUAL_ANALYSIS_PROMPT
     max_completion_tokens: int = 1800
     temperature: float = 0.2
     request_timeout_seconds: int = 180
@@ -107,6 +98,8 @@ class AISummaryConfig:
     max_videos_per_message: int = 1
     max_videos_per_link: int = 1
     status_message: bool = True
+    summary_format: str = "text"
+    send_format: str = "text"
     asr_model: str = (
         "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
     )
@@ -122,7 +115,7 @@ class AISummaryConfig:
 
     def has_keyword(self, text: str) -> bool:
         """Return whether a message contains any configured summary keyword."""
-        return any(kw and kw in (text or "") for kw in self.keywords)
+        return bool(self.summary_style_for_text(text))
 
     def should_summarize_reply(self, text: str) -> bool:
         """Return whether a reply message should trigger video summarization."""
@@ -131,14 +124,37 @@ class AISummaryConfig:
             self.has_keyword(text)
         )
 
-    @property
-    def selected_prompt(self) -> str:
-        """Return the summary prompt selected by the current style."""
-        return (
-            self.prompts.get(self.style)
-            or DEFAULT_STYLE_PROMPTS["auto"]
-        )
+    def summary_style_for_text(self, text: str) -> str:
+        """Return the requested summary style from trigger commands."""
+        value = str(text or "")
+        matches: List[tuple[int, int, str]] = []
+        for style, keywords in self.summary_keywords_by_style().items():
+            for keyword in keywords:
+                keyword_text = str(keyword or "").strip()
+                if not keyword_text:
+                    continue
+                index = value.find(keyword_text)
+                if index >= 0:
+                    matches.append((index, -len(keyword_text), style))
+        if not matches:
+            return ""
+        matches.sort()
+        return matches[0][2]
 
+    def summary_trigger_keywords(self) -> List[str]:
+        """Return all summary trigger commands, longest first."""
+        keywords: List[str] = []
+        for values in self.summary_keywords_by_style().values():
+            keywords.extend(values)
+        return sorted(keywords, key=len, reverse=True)
+
+    def summary_keywords_by_style(self) -> Dict[str, List[str]]:
+        """Return trigger commands grouped by requested summary style."""
+        return {
+            "professional": self.professional_keywords,
+            "brief": self.brief_keywords,
+            "auto": self.auto_keywords,
+        }
 
 def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
     """Normalize AstrBot plugin configuration into a runtime config object."""
@@ -177,43 +193,30 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
     advanced_summary_raw = _dict(advanced_quality_raw.get("summary", {}))
     advanced_vision_raw = _dict(advanced_quality_raw.get("vision", {}))
     advanced_asr_raw = _dict(advanced_quality_raw.get("asr", {}))
-    prompt_raw = _dict(raw.get("prompts", {}))
     output_raw = _dict(raw.get("output", {}))
     admin_raw = _dict(raw.get("admin", {}))
 
-    style = _normalize_summary_style(basic_summary_raw.get("style", "自动"))
     provider_source = _normalize_llm_provider_source(
         llm_raw.get("provider_source", "AstrBot 内置提供商")
     )
     astrbot_provider_raw = _dict(llm_raw.get("astrbot_provider", {}))
     custom_provider_raw = _dict(llm_raw.get("custom_provider", {}))
 
-    prompts = {
-        "auto": _prompt_or_default(
-            prompt_raw.get("auto_prompt"),
-            DEFAULT_STYLE_PROMPTS["auto"],
-        ),
-        "brief": _prompt_or_default(
-            prompt_raw.get("brief_prompt"),
-            DEFAULT_STYLE_PROMPTS["brief"],
-        ),
-        "professional": _prompt_or_default(
-            prompt_raw.get("professional_prompt"),
-            DEFAULT_STYLE_PROMPTS["professional"],
-        ),
-    }
-    system_prompt = _prompt_or_default(
-        prompt_raw.get("system_prompt"),
-        DEFAULT_SUMMARY_SYSTEM_PROMPT,
-    )
     cache_dir = _default_cache_dir()
     model_dir = os.path.join(cache_dir, "models", "funasr")
 
-    keywords = _normalize_list(
-        trigger_raw.get("keywords", ["总结视频", "视频总结", "总结一下"])
+    auto_keywords = _normalize_trigger_keywords(
+        trigger_raw.get("auto_keywords"),
+        DEFAULT_AUTO_KEYWORDS,
     )
-    if not keywords:
-        keywords = ["总结视频", "视频总结", "总结一下"]
+    brief_keywords = _normalize_trigger_keywords(
+        trigger_raw.get("brief_keywords"),
+        DEFAULT_BRIEF_KEYWORDS,
+    )
+    professional_keywords = _normalize_trigger_keywords(
+        trigger_raw.get("professional_keywords"),
+        DEFAULT_PROFESSIONAL_KEYWORDS,
+    )
 
     provider = _normalize_llm_provider(
         custom_provider_raw.get("provider", "自定义 OpenAI 兼容")
@@ -243,18 +246,9 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         reply_keyword_trigger=bool(
             trigger_raw.get("reply_keyword_trigger", True)
         ),
-        keywords=keywords,
-        style=style,
-        system_prompt=system_prompt,
-        prompts=prompts,
-        vision_decision_prompt=_prompt_or_default(
-            prompt_raw.get("vision_decision_prompt"),
-            DEFAULT_VISION_DECISION_PROMPT,
-        ),
-        visual_analysis_prompt=_prompt_or_default(
-            prompt_raw.get("visual_analysis_prompt"),
-            DEFAULT_VISUAL_ANALYSIS_PROMPT,
-        ),
+        auto_keywords=auto_keywords,
+        brief_keywords=brief_keywords,
+        professional_keywords=professional_keywords,
         max_completion_tokens=_int_config(
             basic_summary_raw.get("max_completion_tokens"),
             1800,
@@ -331,6 +325,12 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         show_error=bool(output_raw.get("show_error", True)),
         enable_summary_repair=bool(output_raw.get("enable_summary_repair", True)),
         status_message=bool(output_raw.get("status_message", True)),
+        summary_format=_normalize_summary_format(
+            output_raw.get("summary_format", "纯文本")
+        ),
+        send_format=_normalize_send_format(
+            output_raw.get("send_format", "文本")
+        ),
         max_concurrent=_int_config(
             advanced_summary_raw.get("max_concurrent"),
             1,
@@ -400,16 +400,47 @@ def _normalize_list(values: Any) -> List[str]:
     return normalized
 
 
-def _prompt_or_default(value: Any, default: str) -> str:
+def _normalize_trigger_keywords(
+    values: Any,
+    defaults: List[str],
+) -> List[str]:
+    """Return configured trigger commands or defaults."""
+    normalized = _normalize_list(values)
+    return normalized or list(defaults)
+
+
+def _normalize_summary_format(value: Any) -> str:
+    """Normalize summary content format to text or markdown."""
     text = str(value or "").strip()
-    return text if text else default
+    lowered = text.casefold()
+    mapping = {
+        "text": "text",
+        "plain": "text",
+        "plain_text": "text",
+        "纯文本": "text",
+        "文本": "text",
+        "markdown": "markdown",
+        "md": "markdown",
+    }
+    return mapping.get(text, mapping.get(lowered, "text"))
 
 
-def _normalize_summary_style(value: Any) -> str:
-    """Map display labels or raw keys to a supported summary style."""
-    text = str(value or "").strip() or "自动"
-    style = SUMMARY_STYLE_OPTIONS.get(text, text)
-    return style if style in DEFAULT_STYLE_PROMPTS else "auto"
+def _normalize_send_format(value: Any) -> str:
+    """Normalize final message delivery format to text or image."""
+    text = str(value or "").strip()
+    lowered = text.casefold()
+    mapping = {
+        "text": "text",
+        "plain": "text",
+        "纯文本": "text",
+        "文本": "text",
+        "文字": "text",
+        "image": "image",
+        "img": "image",
+        "图片": "image",
+        "图像": "image",
+    }
+    return mapping.get(text, mapping.get(lowered, "text"))
 
 
 def _normalize_llm_provider_source(value: Any) -> str:

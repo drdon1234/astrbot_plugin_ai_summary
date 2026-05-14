@@ -22,6 +22,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 from .core.config import AISummaryConfig, parse_config
+from .core.output_render import render_summary_image_file
 from .core.summary import AISummaryManager
 
 
@@ -115,17 +116,22 @@ class AISummaryPlugin(Star):
             self._active_tasks.discard(task)
 
     def _clear_video_cache_dir(self) -> None:
-        """Remove downloaded videos owned by this plugin instance."""
+        """Remove runtime files owned by this plugin instance."""
         raw_cache_dir = str(getattr(self.config, "cache_dir", "") or "").strip()
         if not raw_cache_dir:
             return
-        downloads_dir = Path(raw_cache_dir).resolve() / "downloads"
-        try:
-            if downloads_dir.exists():
-                shutil.rmtree(downloads_dir, ignore_errors=True)
-                self._debug("已清空视频缓存目录: %r", str(downloads_dir))
-        except Exception as exc:
-            logger.warning(f"AI 总结视频缓存目录清理失败: {exc}")
+        cache_dir = Path(raw_cache_dir).resolve()
+        runtime_dirs = (
+            cache_dir / "downloads",
+            cache_dir / "runtime" / "images",
+        )
+        for target_dir in runtime_dirs:
+            try:
+                if target_dir.exists():
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                    self._debug("已清空运行缓存目录: %r", str(target_dir))
+            except Exception as exc:
+                logger.warning(f"AI 总结运行缓存目录清理失败: {target_dir}, 错误: {exc}")
 
     @filter.event_message_type(EventMessageType.ALL)
     async def test_ai_config(self, event: AstrMessageEvent):
@@ -183,10 +189,12 @@ class AISummaryPlugin(Star):
             if not cfg.permission.check(is_private, sender_id, group_id):
                 return
 
-            summarize_reply = cfg.should_summarize_reply(text)
+            requested_style = cfg.summary_style_for_text(text)
+            summarize_reply = bool(cfg.reply_keyword_trigger and requested_style)
             self._debug(
-                "触发检查: reply=%s text=%r",
+                "触发检查: reply=%s style=%s text=%r",
                 summarize_reply,
+                requested_style or "none",
                 text[:120],
             )
             if not summarize_reply:
@@ -201,18 +209,27 @@ class AISummaryPlugin(Star):
                 [candidate.source for candidate in candidates],
             )
             if not candidates:
-                if cfg.has_keyword(text):
+                if requested_style:
                     await event.send(
                         event.plain_result(
-                            "未找到可总结的视频，请引用包含视频的消息后再发送总结关键词。"
+                            "未找到可总结的视频，请引用包含视频的消息后再发送总结命令。"
                         )
                     )
                 return
 
             candidates = candidates[: cfg.max_videos_per_message]
             user_hint = self._user_hint_from_text(text)
-            self._attach_user_hint_to_candidates(candidates, user_hint, event)
-            self._debug("可选用户附加说明: %r", user_hint[:120])
+            self._attach_user_hint_to_candidates(
+                candidates,
+                user_hint,
+                event,
+                requested_style,
+            )
+            self._debug(
+                "可选用户附加说明: style=%s hint=%r",
+                requested_style,
+                user_hint[:120],
+            )
             if cfg.status_message:
                 await event.send(event.plain_result("正在进行 AI 总结，请稍候..."))
 
@@ -224,14 +241,44 @@ class AISummaryPlugin(Star):
                 summary = str(metadata.get("ai_summary") or "").strip()
                 error = str(metadata.get("ai_summary_error") or "").strip()
                 if summary:
-                    messages.append(f"AI总结：\n{summary}")
+                    messages.append(self._format_summary_message(summary))
                 elif cfg.show_error and error:
                     messages.append(f"AI总结失败：{error}")
 
             if messages and not self._shutdown_event.is_set():
-                await event.send(event.plain_result("\n\n".join(messages)))
+                await self._send_summary_output(event, "\n\n".join(messages))
         finally:
             self._untrack_current_task(current_task)
+
+    async def _send_summary_output(
+        self,
+        event: AstrMessageEvent,
+        message: str,
+    ) -> None:
+        """Send summary as text or rendered image according to output config."""
+        if str(getattr(self.config, "send_format", "text") or "text") != "image":
+            await event.send(event.plain_result(message))
+            return
+
+        image_ref = await self._render_summary_image(message)
+        await event.send(event.image_result(image_ref))
+
+    async def _render_summary_image(self, message: str) -> str:
+        """Render final summary content with the plugin-owned local renderer."""
+        image_dir = Path(self.config.cache_dir).resolve() / "runtime" / "images"
+        image_path = image_dir / f"summary_{uuid.uuid4().hex}.png"
+        return await render_summary_image_file(
+            message,
+            getattr(self.config, "summary_format", "text"),
+            str(image_path),
+        )
+
+    def _format_summary_message(self, summary: str) -> str:
+        """Format one summary for the configured content format."""
+        text = str(summary or "").strip()
+        if str(getattr(self.config, "summary_format", "text") or "text") == "markdown":
+            return text if text.startswith("# ") else f"# AI 视频总结\n\n{text}"
+        return f"AI总结：\n{text}"
 
     async def _summarize_candidates(
         self,
@@ -1061,9 +1108,10 @@ class AISummaryPlugin(Star):
         candidates: List[VideoCandidate],
         user_hint: str,
         event: Optional[AstrMessageEvent] = None,
+        summary_style: str = "auto",
     ) -> None:
         """Attach user-provided summary hints and event context to candidates."""
-        context = self._candidate_context(user_hint, event)
+        context = self._candidate_context(user_hint, event, summary_style)
         if not context:
             return
         for candidate in candidates:
@@ -1073,8 +1121,12 @@ class AISummaryPlugin(Star):
         self,
         user_hint: str,
         event: Optional[AstrMessageEvent] = None,
+        summary_style: str = "auto",
     ) -> Dict[str, Any]:
         context = self._event_context(event)
+        style = str(summary_style or "").strip()
+        if style:
+            context["summary_style"] = style
         hint = str(user_hint or "").strip()
         if hint:
             context["user_hint"] = hint
@@ -1088,9 +1140,9 @@ class AISummaryPlugin(Star):
         return {"_astrbot_unified_msg_origin": umo} if umo else {}
 
     def _user_hint_from_text(self, text: str) -> str:
-        """Remove trigger keywords and keep the remaining text as user intent."""
+        """Remove trigger commands and keep the remaining text as user intent."""
         hint = str(text or "").strip()
-        for keyword in getattr(self.config, "keywords", []) or []:
+        for keyword in self.config.summary_trigger_keywords():
             keyword_text = str(keyword or "").strip()
             if keyword_text:
                 hint = hint.replace(keyword_text, "")
