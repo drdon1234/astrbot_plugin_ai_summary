@@ -709,7 +709,7 @@ class AISummaryManager:
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": DEFAULT_QA_SYSTEM_PROMPT},
+                {"role": "system", "content": self._qa_system_prompt()},
                 {
                     "role": "user",
                     "content": DEFAULT_QA_USER_PROMPT.format(
@@ -738,6 +738,26 @@ class AISummaryManager:
         )
         text = str(answer or "").strip()
         return text or "我暂时无法生成有效回答，请稍后重试。"
+
+    def _qa_system_prompt(self) -> str:
+        """Return the QA system prompt with output-format constraints."""
+        return f"{DEFAULT_QA_SYSTEM_PROMPT}\n\n{self._qa_format_instruction()}".strip()
+
+    def _qa_format_instruction(self) -> str:
+        """Describe the configured final QA answer format for the LLM."""
+        if self._qa_answer_format() == "markdown":
+            return (
+                "本次问答回答必须输出简洁 Markdown。可以使用短标题、列表、加粗或引用，"
+                "但不要输出代码块或 HTML；除非问题需要结构化拆分，否则优先用短段落直接回答。"
+                "不要在答案末尾添加与问题无关的固定栏目。"
+            )
+        return (
+            "本次问答回答必须输出纯文本。不要使用 Markdown 标题、表格、代码块或 HTML。"
+        )
+
+    def _qa_answer_format(self) -> str:
+        value = str(getattr(self.config, "qa_answer_format", "text") or "text")
+        return "markdown" if value.casefold() == "markdown" else "text"
 
     @staticmethod
     def _format_qa_history(history: Any, max_turns: int) -> str:

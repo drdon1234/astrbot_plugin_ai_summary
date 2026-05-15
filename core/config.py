@@ -111,6 +111,8 @@ class AISummaryConfig:
     status_message: bool = True
     summary_format: str = "text"
     send_format: str = "text"
+    qa_answer_format: str = "text"
+    qa_send_format: str = "text"
     asr_model: str = (
         "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
     )
@@ -363,6 +365,18 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         ),
         send_format=_normalize_send_format(
             output_raw.get("send_format", "文本")
+        ),
+        qa_answer_format=_normalize_summary_format(
+            output_raw.get(
+                "qa_answer_format",
+                output_raw.get("qa_format", "纯文本"),
+            )
+        ),
+        qa_send_format=_normalize_send_format(
+            output_raw.get(
+                "qa_send_format",
+                output_raw.get("qa_delivery_format", "文本"),
+            )
         ),
         max_concurrent=_int_config(
             advanced_summary_raw.get("max_concurrent"),

@@ -267,13 +267,10 @@ class AISummaryPlugin(Star):
                 )
                 if updated_record is not None:
                     record = updated_record
-                send_result = await event.send(
-                    event.plain_result(
-                        self._format_qa_message(
-                            answer,
-                            getattr(record, "record_id", ""),
-                        )
-                    )
+                send_result = await self._send_qa_output(
+                    event,
+                    answer,
+                    getattr(record, "record_id", ""),
                 )
                 self._remember_qa_reply(
                     scope_id,
@@ -413,14 +410,60 @@ class AISummaryPlugin(Star):
             event.chain_result([Image.fromFileSystem(image_ref), Plain(f"\n{marker}")])
         )
 
+    async def _send_qa_output(
+        self,
+        event: AstrMessageEvent,
+        answer: str,
+        record_id: str = "",
+    ) -> Any:
+        """Send QA answers as text or rendered image according to output config."""
+        message = self._format_qa_message(answer)
+        marker = qa_record_marker(record_id)
+        if str(getattr(self.config, "qa_send_format", "text") or "text") != "image":
+            return await event.send(
+                event.plain_result(self._append_qa_marker(message, marker))
+            )
+
+        image_ref = await self._render_qa_image(message)
+        if not marker:
+            return await event.send(event.image_result(image_ref))
+        return await event.send(
+            event.chain_result([Image.fromFileSystem(image_ref), Plain(f"\n{marker}")])
+        )
+
     async def _render_summary_image(self, message: str) -> str:
         """Render final summary content with the plugin-owned local renderer."""
-        image_dir = Path(self.config.cache_dir).resolve() / "runtime" / "images"
-        image_path = image_dir / f"summary_{uuid.uuid4().hex}.png"
-        return await render_summary_image_file(
+        return await self._render_output_image(
             message,
             getattr(self.config, "summary_format", "text"),
+            "summary",
+            "AI 视频总结",
+        )
+
+    async def _render_qa_image(self, message: str) -> str:
+        """Render a QA answer with the plugin-owned local renderer."""
+        return await self._render_output_image(
+            message,
+            getattr(self.config, "qa_answer_format", "text"),
+            "qa",
+            "AI 问答",
+        )
+
+    async def _render_output_image(
+        self,
+        message: str,
+        content_format: str,
+        prefix: str,
+        title: str,
+    ) -> str:
+        """Render final chat content as a local PNG file."""
+        image_dir = Path(self.config.cache_dir).resolve() / "runtime" / "images"
+        image_path = image_dir / f"{prefix}_{uuid.uuid4().hex}.png"
+        return await render_summary_image_file(
+            message,
+            content_format,
             str(image_path),
+            title=title,
         )
 
     def _format_summary_message(self, summary: str) -> str:
@@ -430,12 +473,12 @@ class AISummaryPlugin(Star):
             return text if text.startswith("# ") else f"# AI 视频总结\n\n{text}"
         return f"AI总结：\n{text}"
 
-    def _format_qa_message(self, answer: str, record_id: str = "") -> str:
+    def _format_qa_message(self, answer: str) -> str:
         """Format one QA answer for chat delivery."""
-        return self._append_qa_marker(
-            f"AI问答：\n{str(answer or '').strip()}",
-            qa_record_marker(record_id),
-        )
+        text = str(answer or "").strip()
+        if str(getattr(self.config, "qa_answer_format", "text") or "text") == "markdown":
+            return text if text.startswith("# ") else f"# AI 问答\n\n{text}"
+        return f"AI问答：\n{text}"
 
     @staticmethod
     def _append_qa_marker(message: str, marker: str) -> str:

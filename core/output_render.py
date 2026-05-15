@@ -19,6 +19,7 @@ async def render_summary_image_file(
     content_format: str,
     output_path: str,
     *,
+    title: str = "AI 视频总结",
     width: int = _DEFAULT_CANVAS_WIDTH,
     timeout_seconds: int = 60,
 ) -> str:
@@ -29,6 +30,7 @@ async def render_summary_image_file(
         text,
         content_format,
         output,
+        title,
         width=max(_MIN_CANVAS_WIDTH, int(width or _DEFAULT_CANVAS_WIDTH)),
         timeout_seconds=timeout_seconds,
     )
@@ -45,6 +47,7 @@ async def _render_text_image_file(
     text: str,
     content_format: str,
     output_path: Path,
+    title: str,
     *,
     width: int,
     timeout_seconds: int,
@@ -55,6 +58,7 @@ async def _render_text_image_file(
             text,
             content_format,
             output_path,
+            title,
             width,
         ),
         timeout=max(10, int(timeout_seconds or 60)),
@@ -65,6 +69,7 @@ def _render_text_image_file_sync(
     text: str,
     content_format: str,
     output_path: Path,
+    title: str,
     width: int,
 ) -> None:
     """Draw a readable summary card image using Pillow."""
@@ -84,8 +89,8 @@ def _render_text_image_file_sync(
 
     probe = Image.new("RGB", (canvas_width, 200), "#f4f7f2")
     draw = ImageDraw.Draw(probe)
-    title, sections = _summary_to_text_sections(text, content_format)
-    title_lines = _wrap_text(draw, title, title_font, content_width - 72)
+    image_title, sections = _summary_to_text_sections(text, content_format, title)
+    title_lines = _wrap_text(draw, image_title, title_font, content_width - 72)
     title_line_height = _line_height(draw, title_font, 1.35)
     heading_line_height = _line_height(draw, heading_font, 1.32)
     subheading_line_height = _line_height(draw, subheading_font, 1.28)
@@ -175,9 +180,10 @@ def _render_text_image_file_sync(
 def _summary_to_text_sections(
     text: str,
     content_format: str,
+    default_title: str = "AI 视频总结",
 ) -> tuple[str, List[dict[str, object]]]:
     is_markdown = str(content_format or "").casefold() == "markdown"
-    title = "AI 视频总结"
+    title = str(default_title or "").strip() or "AI 视频总结"
     sections: List[dict[str, object]] = [{"heading": "", "items": []}]
 
     for raw_line in str(text or "").strip().splitlines():

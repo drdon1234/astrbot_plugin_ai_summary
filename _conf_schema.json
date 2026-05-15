@@ -409,6 +409,26 @@
                 "hint": "选择最终回复直接发送文本，或生成图片后发送；图片模式使用 Pillow 和插件本地字体绘制温和浅色卡片",
                 "default": "文本"
             },
+            "qa_answer_format": {
+                "description": "问答回答格式",
+                "type": "string",
+                "options": [
+                    "纯文本",
+                    "Markdown"
+                ],
+                "hint": "选择 AI 问答回答输出为普通文本或 Markdown；问答图片发送模式下 Markdown 会渲染为温和浅色卡片",
+                "default": "纯文本"
+            },
+            "qa_send_format": {
+                "description": "问答发送格式",
+                "type": "string",
+                "options": [
+                    "文本",
+                    "图片"
+                ],
+                "hint": "选择问答回复直接发送文本，或生成图片后发送；图片模式会把问答ID作为同条消息的文本标记一起发送",
+                "default": "文本"
+            },
             "status_message": {
                 "description": "发送处理中提示",
                 "type": "bool",

@@ -279,7 +279,9 @@ sequenceDiagram
 
 - `status_message`：是否发送处理中提示
 - `summary_format`：最终总结内容格式，可选纯文本或 Markdown
-- `send_format`：最终回复发送格式，可选文本或图片；图片模式通过 Pillow 和插件本地字体生成温和浅色单列卡片图片
+- `send_format`：最终总结发送格式，可选文本或图片；图片模式通过 Pillow 和插件本地字体生成温和浅色单列卡片图片
+- `qa_answer_format`：最终问答回答格式，可选纯文本或 Markdown
+- `qa_send_format`：最终问答发送格式，可选文本或图片；图片模式会把 `问答ID` 作为同条消息里的文本标记一起发送
 - `show_error`：是否回显失败原因
 - `enable_summary_repair`：是否在最终回复前启用格式修复，默认清理原始转写泄漏、非标准核对标记和不一致的不确定性注释
 
@@ -295,7 +297,7 @@ sequenceDiagram
 - `cache_dir`：插件根缓存目录
 - `cache_dir/runtime/`：运行时状态目录
 - `cache_dir/downloads/`：视频下载目录
-- `cache_dir/runtime/images/`：图片发送模式生成的临时总结图片目录
+- `cache_dir/runtime/images/`：图片发送模式生成的临时总结和问答图片目录
 - `cache_dir/runtime/summary_tmp/`：临时音频、转写和视觉分析目录
 - `cache_dir/runtime/qa_records/`：总结问答临时知识库记录目录
 
