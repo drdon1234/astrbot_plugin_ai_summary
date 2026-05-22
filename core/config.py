@@ -113,6 +113,7 @@ class AISummaryConfig:
     send_format: str = "text"
     qa_answer_format: str = "text"
     qa_send_format: str = "text"
+    image_font_size: int = 25
     asr_model: str = (
         "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
     )
@@ -377,6 +378,12 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
                 "qa_send_format",
                 output_raw.get("qa_delivery_format", "文本"),
             )
+        ),
+        image_font_size=_int_config(
+            output_raw.get("image_font_size"),
+            25,
+            minimum=16,
+            maximum=48,
         ),
         max_concurrent=_int_config(
             advanced_summary_raw.get("max_concurrent"),

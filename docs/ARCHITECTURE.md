@@ -86,6 +86,7 @@ core/
 
 - 使用 Pillow 将纯文本或常见 Markdown 结构绘制为温和浅色单列卡片 PNG
 - 固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，避免依赖系统中文字体
+- 通过 `output.image_font_size` 控制图片正文基础字号，标题和小标题按比例缩放
 - 不依赖外部截图渲染器
 
 ### `core/qa_runtime.py`
@@ -282,6 +283,7 @@ sequenceDiagram
 - `send_format`：最终总结发送格式，可选文本或图片；图片模式通过 Pillow 和插件本地字体生成温和浅色单列卡片图片
 - `qa_answer_format`：最终问答回答格式，可选纯文本或 Markdown
 - `qa_send_format`：最终问答发送格式，可选文本或图片；图片模式会把 `问答ID` 作为同条消息里的文本标记一起发送
+- `image_font_size`：图片发送模式使用的正文基础字号，建议范围 16-48，标题和小标题按比例放大
 - `show_error`：是否回显失败原因
 - `enable_summary_repair`：是否在最终回复前启用格式修复，默认清理原始转写泄漏、非标准核对标记和不一致的不确定性注释
 

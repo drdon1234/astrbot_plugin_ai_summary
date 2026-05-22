@@ -464,6 +464,7 @@ class AISummaryPlugin(Star):
             content_format,
             str(image_path),
             title=title,
+            font_size=getattr(self.config, "image_font_size", 25),
         )
 
     def _format_summary_message(self, summary: str) -> str:

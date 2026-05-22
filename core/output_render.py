@@ -12,6 +12,9 @@ _LOCAL_FONT_PATH = _FONT_DIR / "NotoSansCJKsc-Regular.otf"
 _LOCAL_BOLD_FONT_PATH = _FONT_DIR / "NotoSansCJKsc-Bold.otf"
 _DEFAULT_CANVAS_WIDTH = 960
 _MIN_CANVAS_WIDTH = 760
+_DEFAULT_IMAGE_FONT_SIZE = 25
+_MIN_IMAGE_FONT_SIZE = 16
+_MAX_IMAGE_FONT_SIZE = 48
 
 
 async def render_summary_image_file(
@@ -21,6 +24,7 @@ async def render_summary_image_file(
     *,
     title: str = "AI 视频总结",
     width: int = _DEFAULT_CANVAS_WIDTH,
+    font_size: int = _DEFAULT_IMAGE_FONT_SIZE,
     timeout_seconds: int = 60,
 ) -> str:
     """Render a summary to a PNG file using the bundled Pillow font path."""
@@ -32,6 +36,7 @@ async def render_summary_image_file(
         output,
         title,
         width=max(_MIN_CANVAS_WIDTH, int(width or _DEFAULT_CANVAS_WIDTH)),
+        font_size=_normalize_image_font_size(font_size),
         timeout_seconds=timeout_seconds,
     )
     return _validated_output_path(output)
@@ -50,6 +55,7 @@ async def _render_text_image_file(
     title: str,
     *,
     width: int,
+    font_size: int,
     timeout_seconds: int,
 ) -> None:
     await asyncio.wait_for(
@@ -60,6 +66,7 @@ async def _render_text_image_file(
             output_path,
             title,
             width,
+            font_size,
         ),
         timeout=max(10, int(timeout_seconds or 60)),
     )
@@ -71,6 +78,7 @@ def _render_text_image_file_sync(
     output_path: Path,
     title: str,
     width: int,
+    font_size: int,
 ) -> None:
     """Draw a readable summary card image using Pillow."""
     try:
@@ -81,11 +89,24 @@ def _render_text_image_file_sync(
     canvas_width = max(_MIN_CANVAS_WIDTH, int(width or _DEFAULT_CANVAS_WIDTH))
     margin_x = max(34, canvas_width // 24)
     content_width = canvas_width - margin_x * 2
+    body_font_size = _normalize_image_font_size(font_size)
 
-    title_font = _load_pillow_font(ImageFont, 40, bold=True)
-    heading_font = _load_pillow_font(ImageFont, 30, bold=True)
-    subheading_font = _load_pillow_font(ImageFont, 26, bold=True)
-    body_font = _load_pillow_font(ImageFont, 25)
+    title_font = _load_pillow_font(
+        ImageFont,
+        round(body_font_size * 1.6),
+        bold=True,
+    )
+    heading_font = _load_pillow_font(
+        ImageFont,
+        round(body_font_size * 1.2),
+        bold=True,
+    )
+    subheading_font = _load_pillow_font(
+        ImageFont,
+        round(body_font_size * 1.04),
+        bold=True,
+    )
+    body_font = _load_pillow_font(ImageFont, body_font_size)
 
     probe = Image.new("RGB", (canvas_width, 200), "#f4f7f2")
     draw = ImageDraw.Draw(probe)
@@ -361,6 +382,14 @@ def _text_width(draw: object, text: str, font: object) -> int:
 def _line_height(draw: object, font: object, factor: float) -> int:
     bbox = draw.textbbox((0, 0), "视频总结Ag", font=font)  # type: ignore[attr-defined]
     return max(1, int((bbox[3] - bbox[1]) * factor))
+
+
+def _normalize_image_font_size(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = _DEFAULT_IMAGE_FONT_SIZE
+    return max(_MIN_IMAGE_FONT_SIZE, min(_MAX_IMAGE_FONT_SIZE, parsed))
 
 
 def _load_pillow_font(image_font: object, size: int, *, bold: bool = False) -> object:
