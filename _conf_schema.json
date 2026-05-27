@@ -12,23 +12,38 @@
             "auto_keywords": {
                 "description": "自动总结命令",
                 "type": "list",
+                "hint": "根据视频内容自动选择口语概述、新闻摘要或笔记总结；适合作为默认总结入口",
                 "default": [
                     "总结一下",
-                    "总结视频"
+                    "总结视频",
+                    "自动总结"
                 ]
             },
-            "brief_keywords": {
-                "description": "简略总结命令",
+            "oral_keywords": {
+                "description": "口语概述命令",
                 "type": "list",
+                "hint": "强制生成适合群聊快速理解的自然口语概述；旧的“简略总结 / 简单总结”仍兼容到此模式",
                 "default": [
-                    "简略总结",
-                    "简单总结"
+                    "口语概述",
+                    "口语总结"
                 ]
             },
-            "professional_keywords": {
-                "description": "专业总结命令",
+            "news_keywords": {
+                "description": "新闻摘要命令",
                 "type": "list",
+                "hint": "生成类似 BiliNote 新闻卡片的事件背景、经过、身份数据和处置进展",
                 "default": [
+                    "新闻摘要",
+                    "事件摘要",
+                    "新闻总结"
+                ]
+            },
+            "note_keywords": {
+                "description": "笔记总结命令",
+                "type": "list",
+                "hint": "生成偏本项目原专业总结的结构化笔记，适合归档和复盘",
+                "default": [
+                    "笔记总结",
                     "专业总结",
                     "详细总结"
                 ]
@@ -428,6 +443,31 @@
                 ],
                 "hint": "选择问答回复直接发送文本，或生成图片后发送；图片模式会把问答ID作为同条消息的文本标记一起发送",
                 "default": "文本"
+            },
+            "image_style": {
+                "description": "图片渲染风格",
+                "type": "string",
+                "options": [
+                    "清新",
+                    "科技感",
+                    "专业严肃",
+                    "温和卡片"
+                ],
+                "hint": "只影响图片视觉，不影响摘要内容模板；清新接近 BiliNote 的粉色便签风格，科技感为深色霓虹风格，专业严肃为白灰蓝商务风格",
+                "default": "清新"
+            },
+            "image_font_family": {
+                "description": "图片字体",
+                "type": "string",
+                "options": [
+                    "默认黑体",
+                    "专业宋体",
+                    "清新文楷",
+                    "标题手札",
+                    "科技窄体"
+                ],
+                "hint": "只允许选择插件 resource/font 目录下的内置字体，不读取系统字体或自定义路径；默认黑体适合通用总结，专业宋体更正式，清新文楷更轻松，标题手札适合标题感，科技窄体适合科技风格",
+                "default": "默认黑体"
             },
             "image_font_size": {
                 "description": "图片字体大小",

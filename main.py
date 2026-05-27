@@ -66,7 +66,7 @@ class QARequest:
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "基于本地语音转写，结合用户提示词与视觉信息的多模态 AI 视频总结工具",
-    "0.2.0",
+    "0.3.0",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered video summaries."""
@@ -465,6 +465,8 @@ class AISummaryPlugin(Star):
             str(image_path),
             title=title,
             font_size=getattr(self.config, "image_font_size", 25),
+            style=getattr(self.config, "image_style", "fresh"),
+            font_family=getattr(self.config, "image_font_family", "noto_sans"),
         )
 
     def _format_summary_message(self, summary: str) -> str:

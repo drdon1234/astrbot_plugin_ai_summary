@@ -9,7 +9,7 @@ _✨ 自动转写视频内容并生成总结 ✨_
 [![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-orange.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/Version-v0.2.1-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
+[![Version](https://img.shields.io/badge/Version-v0.3.0-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
 [![GitHub](https://img.shields.io/badge/作者-drdon1234-blue)](https://github.com/drdon1234)
 
 </div>
@@ -30,14 +30,14 @@ _✨ 自动转写视频内容并生成总结 ✨_
 2. 使用时请引用包含视频的消息，再发送总结命令；命令之外的文字会作为本次总结要求。
 3. 默认使用 AstrBot 已配置的 AI，也可以在插件配置中切换为插件独立 AI 接口。
 4. 当视频语音信息不足时，插件会尝试结合画面补充；效果取决于所选 AI 是否支持图片理解。
-5. 可在“输出控制”中分别选择总结和问答的内容格式（纯文本 / Markdown）与发送格式（文本 / 图片），并调整图片字体大小；图片模式使用插件自定义渲染器生成温和浅色卡片图片。
+5. 可在“输出控制”中分别选择总结和问答的内容格式（纯文本 / Markdown）与发送格式（文本 / 图片），并选择图片渲染风格、内置字体和字号；图片模式默认生成清新风格图片。
 6. 管理员可在私聊中发送 `aiping` 测试 AI 连通性。
 7. 总结、视觉判断和视觉分析均使用内置提示词，WebUI 不再暴露自定义提示词入口。
-8. 总结模式由触发命令决定：`总结一下` / `总结视频` 为自动，`简略总结` / `简单总结` 为简略，`专业总结` / `详细总结` 为专业。
+8. 总结模式由触发命令决定：`总结一下` / `总结视频` / `自动总结` 为自动模式，会根据内容选择口语概述、新闻摘要或笔记总结；`口语概述` / `口语总结` 强制口语概述，`新闻摘要` / `事件摘要` 强制新闻摘要，`笔记总结` / `专业总结` / `详细总结` 强制笔记总结。
 9. 首次总结结果会保存为同一私聊或群聊内的临时问答知识库；私聊和群聊都通过引用插件的总结或问答回复并输入问题来触发对应视频问答。每个视频会保留最近几轮问答作为短对话记忆。
 10. 问答知识库默认按最后检索时间保留 30 分钟，超过后自动清理；可在 `qa.record_ttl_minutes` 中调整，设为 `0` 可关闭自动清理。
 
-图片发送模式使用 Pillow 直接把总结或问答内容绘制为温和浅色卡片图片，并固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，不依赖浏览器截图环境或系统字体。正文基础字号可通过 `output.image_font_size` 调整，标题和小标题会按比例自动放大。
+图片发送模式使用 Pillow 直接把总结或问答内容绘制为图片，并只从插件本地 `resource/font` 目录读取内置字体，不依赖浏览器截图环境或系统字体，也不开放自定义字体路径。`output.image_style` 可选 `清新`、`科技感`、`专业严肃` 或 `温和卡片`，只影响图片视觉，不改变摘要内容；`output.image_font_family` 可选 `默认黑体`、`专业宋体`、`清新文楷`、`标题手札` 或 `科技窄体`；正文基础字号可通过 `output.image_font_size` 调整，标题和小标题会按比例自动放大。
 
 ---
 

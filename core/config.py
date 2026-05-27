@@ -14,11 +14,15 @@ from .summary.llm_provider_defs import (
 
 
 PLUGIN_NAME = "astrbot_plugin_ai_summary"
-DEFAULT_AUTO_KEYWORDS = ["总结一下", "总结视频"]
+DEFAULT_AUTO_KEYWORDS = ["总结一下", "总结视频", "自动总结"]
 DEFAULT_BRIEF_KEYWORDS = ["简略总结", "简单总结"]
 DEFAULT_PROFESSIONAL_KEYWORDS = ["专业总结", "详细总结"]
+DEFAULT_ORAL_KEYWORDS = ["口语概述", "口语总结"]
+DEFAULT_NEWS_KEYWORDS = ["新闻摘要", "事件摘要", "新闻总结"]
+DEFAULT_NOTE_KEYWORDS = ["笔记总结", "专业总结", "详细总结"]
 DEFAULT_QA_EXIT_COMMANDS = ["结束", "退出"]
 DEFAULT_QA_CLEAR_COMMANDS = ["清理", "清空"]
+DEFAULT_IMAGE_FONT_FAMILY = "noto_sans"
 
 
 def _default_cache_dir() -> str:
@@ -78,6 +82,9 @@ class AISummaryConfig:
     professional_keywords: List[str] = field(
         default_factory=lambda: list(DEFAULT_PROFESSIONAL_KEYWORDS)
     )
+    oral_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_ORAL_KEYWORDS))
+    news_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_NEWS_KEYWORDS))
+    note_keywords: List[str] = field(default_factory=lambda: list(DEFAULT_NOTE_KEYWORDS))
     qa_enabled: bool = True
     qa_record_ttl_minutes: int = 30
     qa_history_turns: int = 5
@@ -113,6 +120,8 @@ class AISummaryConfig:
     send_format: str = "text"
     qa_answer_format: str = "text"
     qa_send_format: str = "text"
+    image_style: str = "fresh"
+    image_font_family: str = DEFAULT_IMAGE_FONT_FAMILY
     image_font_size: int = 25
     asr_model: str = (
         "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
@@ -165,9 +174,10 @@ class AISummaryConfig:
     def summary_keywords_by_style(self) -> Dict[str, List[str]]:
         """Return trigger commands grouped by requested summary style."""
         return {
-            "professional": self.professional_keywords,
-            "brief": self.brief_keywords,
             "auto": self.auto_keywords,
+            "note": self.note_keywords,
+            "news": self.news_keywords,
+            "oral": self.oral_keywords,
         }
 
 def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
@@ -232,6 +242,24 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         trigger_raw.get("professional_keywords"),
         DEFAULT_PROFESSIONAL_KEYWORDS,
     )
+    oral_keywords = _merge_trigger_keywords(
+        _normalize_trigger_keywords(
+            trigger_raw.get("oral_keywords"),
+            DEFAULT_ORAL_KEYWORDS,
+        ),
+        brief_keywords,
+    )
+    news_keywords = _normalize_trigger_keywords(
+        trigger_raw.get("news_keywords"),
+        DEFAULT_NEWS_KEYWORDS,
+    )
+    note_keywords = _merge_trigger_keywords(
+        _normalize_trigger_keywords(
+            trigger_raw.get("note_keywords"),
+            DEFAULT_NOTE_KEYWORDS,
+        ),
+        professional_keywords,
+    )
 
     provider = _normalize_llm_provider(
         custom_provider_raw.get("provider", "自定义 OpenAI 兼容")
@@ -264,6 +292,9 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         auto_keywords=auto_keywords,
         brief_keywords=brief_keywords,
         professional_keywords=professional_keywords,
+        oral_keywords=oral_keywords,
+        news_keywords=news_keywords,
+        note_keywords=note_keywords,
         qa_enabled=bool(qa_raw.get("enable", True)),
         qa_record_ttl_minutes=_int_config(
             qa_raw.get("record_ttl_minutes"),
@@ -379,6 +410,12 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
                 output_raw.get("qa_delivery_format", "文本"),
             )
         ),
+        image_style=_normalize_image_style(
+            output_raw.get("image_style", "清新")
+        ),
+        image_font_family=_normalize_image_font_family(
+            output_raw.get("image_font_family", "默认黑体")
+        ),
         image_font_size=_int_config(
             output_raw.get("image_font_size"),
             25,
@@ -463,6 +500,20 @@ def _normalize_trigger_keywords(
     return normalized or list(defaults)
 
 
+def _merge_trigger_keywords(*groups: List[str]) -> List[str]:
+    """Merge trigger command groups without losing configured legacy commands."""
+    merged: List[str] = []
+    seen = set()
+    for group in groups:
+        for value in group:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
 def _normalize_summary_format(value: Any) -> str:
     """Normalize summary content format to text or markdown."""
     text = str(value or "").strip()
@@ -495,6 +546,73 @@ def _normalize_send_format(value: Any) -> str:
         "图像": "image",
     }
     return mapping.get(text, mapping.get(lowered, "text"))
+
+
+def _normalize_image_style(value: Any) -> str:
+    """Normalize image rendering style to a stable internal key."""
+    text = str(value or "").strip()
+    lowered = text.casefold()
+    mapping = {
+        "清新": "fresh",
+        "清新便签": "fresh",
+        "便签": "fresh",
+        "粉色便签": "fresh",
+        "bilinote": "fresh",
+        "note": "fresh",
+        "fresh_note": "fresh",
+        "科技感": "tech",
+        "科技": "tech",
+        "tech": "tech",
+        "technology": "tech",
+        "专业严肃": "serious",
+        "严肃": "serious",
+        "专业": "serious",
+        "serious": "serious",
+        "professional": "serious",
+        "card": "card",
+        "温和卡片": "card",
+        "卡片": "card",
+        "soft_card": "card",
+        "default": "card",
+    }
+    return mapping.get(text, mapping.get(lowered, "fresh"))
+
+
+def _normalize_image_font_family(value: Any) -> str:
+    """Normalize image font family to a bundled font key."""
+    text = str(value or "").strip()
+    lowered = text.casefold()
+    mapping = {
+        "默认黑体": "noto_sans",
+        "黑体": "noto_sans",
+        "思源黑体": "noto_sans",
+        "noto_sans": "noto_sans",
+        "noto sans": "noto_sans",
+        "default": "noto_sans",
+        "专业宋体": "noto_serif",
+        "宋体": "noto_serif",
+        "思源宋体": "noto_serif",
+        "noto_serif": "noto_serif",
+        "noto serif": "noto_serif",
+        "serif": "noto_serif",
+        "清新文楷": "lxgw_wenkai",
+        "文楷": "lxgw_wenkai",
+        "霞鹜文楷": "lxgw_wenkai",
+        "lxgw_wenkai": "lxgw_wenkai",
+        "lxgw wenkai": "lxgw_wenkai",
+        "wenkai": "lxgw_wenkai",
+        "标题手札": "zcool_xiaowei",
+        "站酷小薇": "zcool_xiaowei",
+        "zcool_xiaowei": "zcool_xiaowei",
+        "zcool xiaowei": "zcool_xiaowei",
+        "xiaowei": "zcool_xiaowei",
+        "科技窄体": "zcool_qingke",
+        "站酷庆科黄油体": "zcool_qingke",
+        "zcool_qingke": "zcool_qingke",
+        "zcool qingke": "zcool_qingke",
+        "qingke": "zcool_qingke",
+    }
+    return mapping.get(text, mapping.get(lowered, DEFAULT_IMAGE_FONT_FAMILY))
 
 
 def _normalize_llm_provider_source(value: Any) -> str:

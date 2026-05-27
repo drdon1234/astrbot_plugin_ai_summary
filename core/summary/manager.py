@@ -24,10 +24,11 @@ from .llm_client import LLMClient
 from .prompts import (
     DEFAULT_QA_SYSTEM_PROMPT,
     DEFAULT_QA_USER_PROMPT,
-    DEFAULT_STYLE_PROMPTS,
     DEFAULT_SUMMARY_SYSTEM_PROMPT,
     DEFAULT_VISION_DECISION_PROMPT,
     DEFAULT_VISUAL_ANALYSIS_PROMPT,
+    build_summary_prompt,
+    normalize_summary_style,
 )
 
 
@@ -76,6 +77,40 @@ class AISummaryManager:
         "business",
         "risk",
         "research",
+    )
+    _AUTO_NEWS_KEYWORDS = (
+        "警方",
+        "通报",
+        "公安",
+        "案件",
+        "违法",
+        "犯罪",
+        "嫌疑",
+        "调查",
+        "处置",
+        "伤情",
+        "受伤",
+        "死亡",
+        "事故",
+        "事件",
+        "发布通报",
+        "news",
+        "police",
+        "case",
+    )
+    _AUTO_STRONG_NEWS_KEYWORDS = (
+        "警方",
+        "通报",
+        "公安",
+        "违法",
+        "犯罪",
+        "嫌疑",
+        "伤情",
+        "受伤",
+        "死亡",
+        "事故",
+        "发布通报",
+        "police",
     )
     _AUTO_LOW_INFO_KEYWORDS = (
         "bgm",
@@ -833,17 +868,24 @@ class AISummaryManager:
         """Describe the configured final summary content format for the LLM."""
         if self._summary_format() == "markdown":
             style = summary_style or self._configured_summary_style()
-            if style == "brief":
+            if style == "oral":
                 return (
                     "本次最终总结必须输出简洁 Markdown。第一行必须是唯一的 h1 标题，"
                     "标题应直接概括视频主题；标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
                     "不要使用“##”二级章节、表格、固定栏目、代码块或 HTML；不要输出“关键总结”“事件脉络”"
                     "“视频脉络”“主体关系”“经验启示”“应对建议”等章节。"
                 )
+            if style == "news":
+                return (
+                    "本次最终总结必须输出新闻摘要 Markdown。第一行必须是唯一的 h1 标题，"
+                    "标题直接概括事件；后续优先使用“## 事件背景概述”“## 核心事件经过”"
+                    "“## 关键数据与身份信息”“## 总结与当前处置进展”四个章节。"
+                    "短段落和 bullet 都要适合图片卡片渲染；不要输出表格、代码块或 HTML。"
+                )
             return (
-                "本次最终总结必须输出结构化 Markdown。第一行必须是唯一的 h1 标题，"
+                "本次最终总结必须输出笔记总结 Markdown。第一行必须是唯一的 h1 标题，"
                 "标题本身承担主题概括，不要再输出“主题”章节；后续使用"
-                "“## 章节标题”拆分内容板块，每个板块聚焦一个内容面向。专业总结优先包含"
+                "“## 章节标题”拆分内容板块，每个板块聚焦一个内容面向。笔记总结优先包含"
                 "“关键总结”“事件脉络”或“视频脉络”“主体关系”“AI 总结”等板块。"
                 "不要输出“主题”“总览”或“关键数字”章节；重要背景和数字必须在相关结论或脉络中解释清楚。"
                 "“经验启示”只有在视频确实提供可迁移经验、风险教训或决策启发时才输出，"
@@ -865,9 +907,11 @@ class AISummaryManager:
     ) -> str:
         if isinstance(metadata, dict):
             value = str(metadata.get("summary_style", "") or "").casefold()
-            if value in {"auto", "brief", "professional"}:
-                return value
-        return "auto"
+            if value == "auto":
+                return "auto"
+            if value:
+                return normalize_summary_style(value)
+        return "oral"
 
     def _effective_summary_style(
         self,
@@ -888,7 +932,7 @@ class AISummaryManager:
         visual: str,
         visual_decision: Dict[str, Any],
     ) -> str:
-        """Choose brief or professional mode from input density and structure."""
+        """Choose oral, news, or note mode from input density and structure."""
         quality = str(visual_decision.get("transcript_quality", "") or "").casefold()
         plain_transcript = self._strip_transcript_timestamps(transcript)
         combined = f"{plain_transcript}\n{visual}".casefold()
@@ -899,6 +943,14 @@ class AISummaryManager:
             1 for keyword in self._AUTO_PROFESSIONAL_KEYWORDS
             if keyword.casefold() in combined
         )
+        news_hits = sum(
+            1 for keyword in self._AUTO_NEWS_KEYWORDS
+            if keyword.casefold() in combined
+        )
+        strong_news_hits = sum(
+            1 for keyword in self._AUTO_STRONG_NEWS_KEYWORDS
+            if keyword.casefold() in combined
+        )
         low_info_hits = sum(
             1 for keyword in self._AUTO_LOW_INFO_KEYWORDS
             if keyword.casefold() in combined
@@ -906,23 +958,27 @@ class AISummaryManager:
         visual_high_density = "信息密度：高" in visual or "信息密度: 高" in visual
 
         if quality in {"empty", "low"} and transcript_chars < 1200 and not visual_high_density:
-            return "brief"
+            return "oral"
+        if strong_news_hits >= 2 and transcript_chars >= 80:
+            return "news"
+        if news_hits >= 2 and 80 <= transcript_chars < 1200 and professional_hits < 2:
+            return "news"
         if transcript_chars >= 1800 or segment_count >= 6:
-            return "professional"
+            return "note"
         if transcript_chars >= 900 and (number_count >= 5 or professional_hits >= 2):
-            return "professional"
+            return "note"
         if visual_high_density and transcript_chars >= 500:
-            return "professional"
+            return "note"
         if low_info_hits and professional_hits == 0:
-            return "brief"
-        return "brief"
+            return "oral"
+        return "oral"
 
     @staticmethod
     def _strip_transcript_timestamps(transcript: str) -> str:
         return re.sub(r"\[\d{2}:\d{2}-\d{2}:\d{2}\]\s*", "", str(transcript or ""))
 
     def _summary_prompt_for_style(self, summary_style: str) -> str:
-        return DEFAULT_STYLE_PROMPTS.get(summary_style, DEFAULT_STYLE_PROMPTS["brief"])
+        return build_summary_prompt(summary_style)
 
     def _adapt_prompt_to_summary_format(self, prompt: str) -> str:
         """Remove default plain-text wording when Markdown output is selected."""
