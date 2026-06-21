@@ -5,6 +5,7 @@ import asyncio
 import base64
 import inspect
 import json
+import mimetypes
 import os
 import re
 import tempfile
@@ -125,7 +126,7 @@ class AISummaryManager:
     )
 
     _REPAIR_SYSTEM_PROMPT = (
-        "你是视频总结格式修复器。只修复已有总结的输出格式，"
+        "你是总结格式修复器。只修复已有总结的输出格式，"
         "删除不应展示的原始转写内容，不新增事实，不改变主要判断。"
     )
 
@@ -166,7 +167,7 @@ class AISummaryManager:
             text = message % args if args else message
         except Exception:
             text = message
-        logger.info(f"AI 总结调试: {text}")
+        logger.debug(f"AI 总结调试: {text}")
 
     @staticmethod
     def _format_bytes(size: int) -> str:
@@ -205,20 +206,25 @@ class AISummaryManager:
         self,
         metadata_list: List[Dict[str, Any]],
     ) -> None:
-        """Summarize all eligible prepared video metadata records."""
+        """Summarize all eligible prepared content metadata records."""
         started_at = time.perf_counter()
-        self.python_runtime.ensure_background_prepare_started()
-        if self.python_runtime.get_status().state == "READY":
-            self.asr_runtime.ensure_background_download_started()
-
         eligible = [
             metadata for metadata in metadata_list
             if self._metadata_can_try_summary(metadata)
         ]
+        needs_video_asr = any(
+            self._metadata_has_video(metadata)
+            for metadata in eligible
+        )
+        if needs_video_asr:
+            self.python_runtime.ensure_background_prepare_started()
+            if self.python_runtime.get_status().state == "READY":
+                self.asr_runtime.ensure_background_download_started()
         self._debug(
-            "总结批次开始: total=%d eligible=%d dependency_state=%s model_state=%s",
+            "总结批次开始: total=%d eligible=%d needs_video_asr=%s dependency_state=%s model_state=%s",
             len(metadata_list),
             len(eligible),
+            needs_video_asr,
             self.python_runtime.get_status().state,
             self.asr_runtime.get_status().state,
         )
@@ -227,7 +233,7 @@ class AISummaryManager:
             for metadata in eligible
         ]
         if not tasks:
-            self._debug("总结批次跳过: 无可总结视频")
+            self._debug("总结批次跳过: 无可总结内容")
             return
 
         try:
@@ -253,40 +259,58 @@ class AISummaryManager:
         """Return whether metadata has enough information for a summary attempt."""
         if metadata.get("error"):
             return False
-        return bool(metadata.get("video_urls"))
+        return bool(
+            metadata.get("video_urls")
+            or metadata.get("image_file_paths")
+            or str(metadata.get("content_text", "") or "").strip()
+        )
+
+    @staticmethod
+    def _metadata_has_video(metadata: Dict[str, Any]) -> bool:
+        """Return whether a metadata record contains any prepared video input."""
+        return bool(metadata.get("video_urls") or metadata.get("file_paths"))
 
     async def _summarize_one(self, metadata: Dict[str, Any]) -> None:
-        """Run ASR, optional visual analysis, and LLM summarization for one record."""
+        """Run the required text, image, and video analysis for one record."""
         async with self._summary_semaphore:
             started_at = time.perf_counter()
             source = str(metadata.get("url", "") or "")
             try:
                 self._debug("总结任务开始: url=%r", source)
-                dependency_status = self.python_runtime.get_status()
-                model_status = self.asr_runtime.get_status()
-                self._debug(
-                    "运行时状态: dependency=%s message=%r model=%s message=%r",
-                    dependency_status.state,
-                    dependency_status.message,
-                    model_status.state,
-                    model_status.message,
-                )
-                await self._ensure_python_runtime_ready_for_request()
-                await self._ensure_asr_ready_for_request()
                 video_paths = self._local_video_paths(metadata)
-                if not video_paths:
-                    raise RuntimeError(
-                        "没有可用于总结的本地视频文件；请确认视频下载目录可用，"
-                        "且视频未超过大小限制或下载失败"
-                    )
+                image_paths = self._local_image_paths(metadata)
+                content_text = self._metadata_content_text(metadata)
+                if not video_paths and not image_paths and not content_text:
+                    raise RuntimeError("没有可用于总结的引用内容")
                 self._debug(
-                    "本地视频路径: count=%d paths=%s",
+                    "本地输入: text_chars=%d videos=%d images=%d video_paths=%s image_paths=%s",
+                    len(content_text),
                     len(video_paths),
+                    len(image_paths),
                     video_paths,
+                    image_paths,
                 )
 
-                summaries: List[str] = []
+                transcript_parts: List[str] = []
+                visual_parts: List[str] = []
+                visual_decisions: List[Dict[str, Any]] = []
+                if content_text:
+                    transcript_parts.append(f"引用文字：\n{content_text}")
+
                 for index, video_path in enumerate(video_paths, start=1):
+                    if index == 1:
+                        dependency_status = self.python_runtime.get_status()
+                        model_status = self.asr_runtime.get_status()
+                        self._debug(
+                            "运行时状态: dependency=%s message=%r model=%s message=%r",
+                            dependency_status.state,
+                            dependency_status.message,
+                            model_status.state,
+                            model_status.message,
+                        )
+                        await self._ensure_python_runtime_ready_for_request()
+                        await self._ensure_asr_ready_for_request()
+
                     transcript_started_at = time.perf_counter()
                     self._debug(
                         "视频[%d] ASR开始: path=%r size=%s",
@@ -309,11 +333,16 @@ class AISummaryManager:
                             self.config.max_transcript_chars,
                         )
                         transcript = transcript[: self.config.max_transcript_chars]
+                    if transcript:
+                        transcript_parts.append(
+                            f"视频[{index}]语音转写：\n{transcript}"
+                        )
                     decision_started_at = time.perf_counter()
                     visual_decision = await self._decide_visual_fallback(
                         metadata,
-                        transcript,
+                        self._joined_context([content_text, transcript]),
                     )
+                    visual_decisions.append(visual_decision)
                     self._debug(
                         "视频[%d] 视觉判定完成: need_visual=%s quality=%r reason=%r elapsed=%.2fs",
                         index,
@@ -346,27 +375,52 @@ class AISummaryManager:
                             )
                             visual = f"视觉兜底失败：{e}"
 
-                    llm_started_at = time.perf_counter()
-                    self._debug("视频[%d] LLM总结开始", index)
-                    summary = await self._call_llm_summary(
-                        metadata,
-                        transcript,
-                        visual,
-                        visual_decision,
-                    )
-                    self._debug(
-                        "视频[%d] LLM总结完成: summary_chars=%d elapsed=%.2fs",
-                        index,
-                        len(summary),
-                        time.perf_counter() - llm_started_at,
-                    )
-                    summaries.append(summary)
+                    if visual:
+                        visual_parts.append(f"视频[{index}]视觉观察：\n{visual}")
 
-                metadata["ai_summary"] = "\n\n".join(summaries).strip()
+                if image_paths:
+                    visual_parts.append(self._image_visual_note(image_paths))
+
+                transcript = self._limit_context_text(
+                    "\n\n".join(part for part in transcript_parts if part).strip(),
+                    int(self.config.max_transcript_chars),
+                    "引用文字/语音转写",
+                )
+                visual = self._limit_context_text(
+                    "\n\n".join(part for part in visual_parts if part).strip(),
+                    max(1000, int(self.config.vision_max_chars or 8000)),
+                    "视觉输入",
+                )
+                visual_decision = self._combined_visual_decision(
+                    transcript,
+                    visual,
+                    bool(image_paths),
+                    visual_decisions,
+                )
+                llm_started_at = time.perf_counter()
                 self._debug(
-                    "总结任务完成: url=%r videos=%d summary_chars=%d elapsed=%.2fs",
+                    "LLM总结开始: transcript_chars=%d visual_chars=%d images=%d",
+                    len(transcript),
+                    len(visual),
+                    len(image_paths),
+                )
+                metadata["ai_summary"] = await self._call_llm_summary(
+                    metadata,
+                    transcript,
+                    visual,
+                    visual_decision,
+                    image_paths=image_paths,
+                )
+                self._debug(
+                    "LLM总结完成: summary_chars=%d elapsed=%.2fs",
+                    len(metadata["ai_summary"]),
+                    time.perf_counter() - llm_started_at,
+                )
+                self._debug(
+                    "总结任务完成: url=%r videos=%d images=%d summary_chars=%d elapsed=%.2fs",
                     source,
                     len(video_paths),
+                    len(image_paths),
                     len(metadata["ai_summary"]),
                     time.perf_counter() - started_at,
                 )
@@ -435,6 +489,89 @@ class AISummaryManager:
             if len(paths) >= self.config.max_videos_per_link:
                 break
         return paths
+
+    def _local_image_paths(self, metadata: Dict[str, Any]) -> List[str]:
+        """Return existing local image paths selected from prepared metadata."""
+        raw_paths = metadata.get("image_file_paths") or []
+        if not isinstance(raw_paths, list):
+            return []
+        limit = self._max_summary_images()
+        paths: List[str] = []
+        for raw_path in raw_paths:
+            path = str(raw_path or "").strip()
+            if path and os.path.isfile(path):
+                paths.append(path)
+            if len(paths) >= limit:
+                break
+        return paths
+
+    def _max_summary_images(self) -> int:
+        """Limit direct image inputs to keep one request reasonably sized."""
+        try:
+            configured = int(getattr(self.config, "vision_max_frames", 8) or 0)
+        except (TypeError, ValueError):
+            configured = 8
+        if configured <= 0:
+            configured = 8
+        return max(1, min(16, configured))
+
+    @staticmethod
+    def _metadata_content_text(metadata: Dict[str, Any]) -> str:
+        return str(metadata.get("content_text", "") or "").strip()
+
+    @staticmethod
+    def _joined_context(parts: List[str]) -> str:
+        return "\n\n".join(str(part or "").strip() for part in parts if str(part or "").strip())
+
+    def _limit_context_text(self, text: str, limit: int, label: str) -> str:
+        value = str(text or "").strip()
+        max_chars = max(500, int(limit or 0))
+        if len(value) <= max_chars:
+            return value
+        self._debug(
+            "%s截断: original_chars=%d limit=%d",
+            label,
+            len(value),
+            max_chars,
+        )
+        return value[:max_chars].rstrip() + f"\n（{label}因长度限制已截断）"
+
+    @staticmethod
+    def _image_visual_note(image_paths: List[str]) -> str:
+        count = len(image_paths)
+        return (
+            f"引用图片：随请求附带 {count} 张图片。请直接阅读图片内容，"
+            "同时提取图片中的可读文字、主要对象、场景、动作、关系和可确认信息。"
+        )
+
+    @staticmethod
+    def _combined_visual_decision(
+        transcript: str,
+        visual: str,
+        has_images: bool,
+        decisions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        need_visual = has_images or bool(visual.strip()) or any(
+            bool(decision.get("need_visual")) for decision in decisions
+        )
+        reasons = [
+            str(decision.get("reason", "") or "").strip()
+            for decision in decisions
+            if str(decision.get("reason", "") or "").strip()
+        ]
+        if has_images:
+            reasons.insert(0, "引用内容包含图片")
+        quality = "sufficient" if transcript.strip() else "empty"
+        for decision in decisions:
+            value = str(decision.get("transcript_quality", "") or "").strip()
+            if value in {"empty", "low", "partial"}:
+                quality = value
+                break
+        return {
+            "need_visual": need_visual,
+            "reason": "；".join(reasons) or ("包含视觉输入" if need_visual else "未使用视觉输入"),
+            "transcript_quality": quality,
+        }
 
     async def _transcribe_video(self, video_path: str) -> str:
         """Extract audio, run the ASR worker, and return transcript text."""
@@ -674,9 +811,10 @@ class AISummaryManager:
         transcript: str,
         visual: str = "",
         visual_decision: Optional[Dict[str, Any]] = None,
+        image_paths: Optional[List[str]] = None,
     ) -> str:
         """Render the summary prompt, call the LLM, and clean the result."""
-        missing = self._missing_llm_fields(metadata)
+        missing = self._missing_llm_fields(metadata, include_persona=True)
         if missing:
             raise RuntimeError("未配置 AI 总结接口: " + "、".join(missing))
 
@@ -694,19 +832,38 @@ class AISummaryManager:
             visual_decision or {},
             effective_style,
         )
+        attached_images = [
+            str(path)
+            for path in (image_paths or [])
+            if str(path or "").strip() and os.path.isfile(str(path))
+        ]
+        user_content: Any = prompt
+        if attached_images:
+            content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+            detail = str(self.config.vision_image_detail or "low")
+            for image_path in attached_images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": self._image_data_url(Path(image_path)),
+                        "detail": detail,
+                    },
+                })
+            user_content = content
         self._debug(
-            "总结Prompt准备完成: configured_style=%s effective_style=%s transcript_chars=%d visual_chars=%d prompt_chars=%d",
+            "总结Prompt准备完成: configured_style=%s effective_style=%s transcript_chars=%d visual_chars=%d prompt_chars=%d images=%d",
             self._configured_summary_style(metadata),
             effective_style,
             len(transcript),
             len(visual),
             len(prompt),
+            len(attached_images),
         )
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": self._summary_system_prompt(effective_style)},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ],
             "temperature": self.config.temperature,
             "max_completion_tokens": self.config.max_completion_tokens,
@@ -715,6 +872,8 @@ class AISummaryManager:
             payload,
             timeout_seconds=self.config.request_timeout_seconds,
             metadata=metadata,
+            image_paths=attached_images,
+            apply_persona=True,
         )
         return await self._postprocess_summary(summary, transcript, metadata)
 
@@ -726,7 +885,7 @@ class AISummaryManager:
     ) -> str:
         """Answer a question using a saved summary plus recent QA turns."""
         metadata = metadata or {}
-        missing = self._missing_llm_fields(metadata)
+        missing = self._missing_llm_fields(metadata, include_persona=True)
         if missing:
             raise RuntimeError("未配置 AI 问答接口: " + "、".join(missing))
 
@@ -737,7 +896,7 @@ class AISummaryManager:
             int(getattr(self.config, "qa_history_turns", 5) or 0),
         )
         if not summary:
-            return "当前没有可用的视频上下文，请先完成一次视频总结。"
+            return "当前没有可用的总结上下文，请先完成一次总结。"
         if not question_text:
             return "请提供要询问的问题。"
 
@@ -770,6 +929,7 @@ class AISummaryManager:
             payload,
             timeout_seconds=self.config.request_timeout_seconds,
             metadata=metadata,
+            apply_persona=True,
         )
         text = str(answer or "").strip()
         return text or "我暂时无法生成有效回答，请稍后重试。"
@@ -871,9 +1031,9 @@ class AISummaryManager:
             if style == "oral":
                 return (
                     "本次最终总结必须输出简洁 Markdown。第一行必须是唯一的 h1 标题，"
-                    "标题应直接概括视频主题；标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
+                    "标题应直接概括引用内容主题；标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
                     "不要使用“##”二级章节、表格、固定栏目、代码块或 HTML；不要输出“关键总结”“事件脉络”"
-                    "“视频脉络”“主体关系”“经验启示”“应对建议”等章节。"
+                    "“内容脉络”“主体关系”“经验启示”“应对建议”等章节。"
                 )
             if style == "news":
                 return (
@@ -886,11 +1046,11 @@ class AISummaryManager:
                 "本次最终总结必须输出笔记总结 Markdown。第一行必须是唯一的 h1 标题，"
                 "标题本身承担主题概括，不要再输出“主题”章节；后续使用"
                 "“## 章节标题”拆分内容板块，每个板块聚焦一个内容面向。笔记总结优先包含"
-                "“关键总结”“事件脉络”或“视频脉络”“主体关系”“AI 总结”等板块。"
+                "“关键总结”“事件脉络”或“内容脉络”“主体关系”“AI 总结”等板块。"
                 "不要输出“主题”“总览”或“关键数字”章节；重要背景和数字必须在相关结论或脉络中解释清楚。"
-                "“经验启示”只有在视频确实提供可迁移经验、风险教训或决策启发时才输出，"
+                "“经验启示”只有在引用内容确实提供可迁移经验、风险教训或决策启发时才输出，"
                 "不要为了固定格式强行添加。如果语音转写中带有 [mm:ss-mm:ss] 时间段，"
-                "可以在事件脉络或视频脉络中保留对应起始时间点；没有时间段时不要编造时间戳。"
+                "可以在事件脉络或内容脉络中保留对应起始时间点；没有时间段时不要编造时间戳。"
                 "可以使用列表、加粗、引用和表格，但不要把整段结果包裹在代码块中，不要输出 HTML。"
             )
         return (
@@ -1100,8 +1260,14 @@ class AISummaryManager:
         timeout_seconds: int,
         metadata: Optional[Dict[str, Any]] = None,
         image_paths: Optional[List[str]] = None,
+        apply_persona: bool = False,
     ) -> str:
         """Route a chat payload through AstrBot's provider or the custom client."""
+        metadata = metadata or {}
+        payload = await self._payload_with_base_persona(
+            payload,
+            apply_persona=apply_persona,
+        )
         route = (
             "astrbot"
             if self._use_astrbot_provider()
@@ -1123,7 +1289,7 @@ class AISummaryManager:
             if self._use_astrbot_provider():
                 text = await self._post_astrbot_completion(
                     payload,
-                    metadata=metadata or {},
+                    metadata=metadata,
                     image_paths=image_paths or [],
                 )
             else:
@@ -1161,14 +1327,159 @@ class AISummaryManager:
                     count += 1
         return count
 
+    async def _payload_with_base_persona(
+        self,
+        payload: Dict[str, Any],
+        *,
+        apply_persona: bool,
+    ) -> Dict[str, Any]:
+        """Prepend the configured AstrBot persona to user-facing LLM prompts."""
+        if not apply_persona:
+            return payload
+        if not self._persona_enabled():
+            return payload
+        persona_id = self._configured_persona_id()
+        if not persona_id:
+            return payload
+
+        persona_prompt = await self._astrbot_persona_prompt(persona_id)
+        if not persona_prompt:
+            return payload
+
+        next_payload = dict(payload)
+        next_payload["messages"] = self._prepend_system_prompt(
+            payload.get("messages") or [],
+            persona_prompt,
+        )
+        self._debug(
+            "已叠加AstrBot人设: persona_id=%r prompt_chars=%d",
+            persona_id,
+            len(persona_prompt),
+        )
+        return next_payload
+
+    def _persona_enabled(self) -> bool:
+        """Return whether the configured AstrBot persona should be applied."""
+        return bool(getattr(self.config, "enable_persona", False))
+
+    def _configured_persona_id(self) -> str:
+        """Return the AstrBot persona id selected in plugin configuration."""
+        return str(getattr(self.config, "persona_id", "") or "").strip()
+
+    async def _astrbot_persona_prompt(self, persona_id: str) -> str:
+        """Resolve one AstrBot persona id to its system prompt text."""
+        if self.astrbot_context is None:
+            raise RuntimeError("未接入 AstrBot Context，无法读取指定人设")
+        persona_manager = getattr(self.astrbot_context, "persona_manager", None)
+        if persona_manager is None:
+            raise RuntimeError("当前 AstrBot Context 未提供 Persona Manager，无法读取指定人设")
+
+        found = False
+        last_error: Optional[Exception] = None
+
+        if hasattr(persona_manager, "get_persona_v3_by_id"):
+            try:
+                persona = persona_manager.get_persona_v3_by_id(persona_id)
+                if persona is not None:
+                    found = True
+                    prompt = self._extract_persona_prompt(persona)
+                    if prompt:
+                        return prompt
+            except Exception as exc:
+                last_error = exc
+                self._debug(
+                    "读取v3人设失败: persona_id=%r error=%s",
+                    persona_id,
+                    exc,
+                )
+
+        if hasattr(persona_manager, "get_persona"):
+            try:
+                persona = await self._maybe_await(persona_manager.get_persona(persona_id))
+                if persona is not None:
+                    found = True
+                    prompt = self._extract_persona_prompt(persona)
+                    if prompt:
+                        return prompt
+            except Exception as exc:
+                last_error = exc
+
+        if found:
+            self._debug("AstrBot人设为空，跳过叠加: persona_id=%r", persona_id)
+            return ""
+        detail = f": {last_error}" if last_error else ""
+        raise RuntimeError(f"未找到 AstrBot 人设: {persona_id}{detail}")
+
+    @staticmethod
+    def _extract_persona_prompt(persona: Any) -> str:
+        """Extract the prompt from new Persona objects or legacy Personality dicts."""
+        if isinstance(persona, dict):
+            for key in ("system_prompt", "prompt"):
+                value = str(persona.get(key, "") or "").strip()
+                if value:
+                    return value
+            return ""
+        for attr in ("system_prompt", "prompt"):
+            value = str(getattr(persona, attr, "") or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _prepend_system_prompt(
+        messages: List[Any],
+        system_prompt: str,
+    ) -> List[Any]:
+        """Prepend persona text to the first system message while preserving order."""
+        persona_prompt = str(system_prompt or "").strip()
+        if not persona_prompt:
+            return list(messages)
+
+        merged: List[Any] = []
+        inserted = False
+        for message in messages:
+            if (
+                not inserted
+                and isinstance(message, dict)
+                and str(message.get("role", "") or "").strip() == "system"
+            ):
+                next_message = dict(message)
+                original = str(next_message.get("content", "") or "").strip()
+                next_message["content"] = (
+                    f"{persona_prompt}\n\n{original}" if original else persona_prompt
+                )
+                merged.append(next_message)
+                inserted = True
+                continue
+            merged.append(message)
+
+        if not inserted:
+            merged.insert(0, {"role": "system", "content": persona_prompt})
+        return merged
+
     def _use_astrbot_provider(self) -> bool:
         """Return whether summaries should use AstrBot's built-in AI provider."""
         return getattr(self.config, "llm_provider_source", "astrbot") == "astrbot"
 
-    def _missing_llm_fields(self, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+    def _missing_llm_fields(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        include_persona: bool = False,
+    ) -> List[str]:
         """List missing fields for the active LLM route."""
+        missing: List[str] = []
+        if include_persona and self._persona_enabled():
+            if not self._configured_persona_id():
+                missing.append("AstrBot 人设ID")
+            persona_manager = (
+                getattr(self.astrbot_context, "persona_manager", None)
+                if self.astrbot_context is not None
+                else None
+            )
+            if self._configured_persona_id() and persona_manager is None:
+                missing.append("AstrBot Persona Manager")
         if self._use_astrbot_provider():
-            missing: List[str] = []
             if self.astrbot_context is None:
                 missing.append("AstrBot Context")
             configured_provider = str(
@@ -1180,7 +1491,8 @@ class AISummaryManager:
             if not configured_provider and not current_origin:
                 missing.append("AstrBot AI Provider")
             return missing
-        return self.llm_client.missing_fields()
+        missing.extend(self.llm_client.missing_fields())
+        return missing
 
     def _llm_can_try(self, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Return whether the active LLM route has enough configuration to run."""
@@ -1452,9 +1764,9 @@ class AISummaryManager:
         """Ask the LLM to repair formatting without adding new facts."""
         issue_text = "\n".join(f"- {issue}" for issue in issues) or "- 输出格式不符合要求"
         prompt = (
-            "请只修复下面这段视频总结，不要重新总结视频，不要新增事实。\n\n"
+            "请只修复下面这段总结，不要重新总结，不要新增事实。\n\n"
             "修复要求：\n"
-            "1. 删除语音转写原文、raw 片段、证据摘录、原文引用和“转写中说……”之类内容。\n"
+            "1. 删除引用原文、语音转写原文、raw 片段、证据摘录、原文引用和“转写中说……”之类内容。\n"
             "2. 保留整理后的总结判断，不改变主要结论。\n"
             "3. 不确定内容必须在正文对应句子后使用“〔疑1〕”“〔疑2〕”等编号标记。\n"
             "4. 如果正文使用了编号标记，末尾添加“注释：”并逐条说明每个编号需要核对的原因；没有编号标记则不要写注释。\n"
@@ -1533,9 +1845,10 @@ class AISummaryManager:
             stripped = re.sub(r"\s*```$", "", stripped)
         wrapper_patterns = [
             r"^\s*视频\[\d+\]\s*(?:总结)?\s*[:：]?\s*",
+            r"^\s*(?:图片|文本|引用内容|内容)\[\d+\]\s*(?:总结)?\s*[:：]?\s*",
             r"^\s*AI\s*总结\s*[:：]\s*",
             r"^\s*AI总结\s*[:：]\s*",
-            r"^\s*以下是(?:修复后的)?(?:视频)?总结\s*[:：]?\s*",
+            r"^\s*以下是(?:修复后的)?(?:视频|图片|文本|引用内容|内容)?总结\s*[:：]?\s*",
         ]
         changed = True
         while changed:
@@ -1553,11 +1866,11 @@ class AISummaryManager:
             return False
         return bool(
             re.match(
-                r"^(?:语音转写|原始转写|转写原文|转写片段|语音原文|原文|raw|asr|证据摘录|转写引用)\s*[:：]",
+                r"^(?:引用原文|引用文字|原始文本|原始内容|语音转写|原始转写|转写原文|转写片段|语音原文|原文|raw|asr|证据摘录|转写引用)\s*[:：]",
                 line,
                 re.I,
             )
-            or re.match(r"^以下是.*(?:语音转写|原始转写|raw|证据摘录)", line, re.I)
+            or re.match(r"^以下是.*(?:引用原文|原始文本|语音转写|原始转写|raw|证据摘录)", line, re.I)
         )
 
     @staticmethod
@@ -1606,7 +1919,7 @@ class AISummaryManager:
             return True
         if issues:
             return True
-        if re.search(r"(?:语音转写|原始转写|转写原文|转写片段|raw|证据摘录)\s*[:：]", text, re.I):
+        if re.search(r"(?:引用原文|引用文字|原始文本|原始内容|语音转写|原始转写|转写原文|转写片段|raw|证据摘录)\s*[:：]", text, re.I):
             return True
         if "需核对" in text:
             return True
@@ -1963,7 +2276,10 @@ class AISummaryManager:
     @staticmethod
     def _image_data_url(path: Path) -> str:
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:image/jpeg;base64,{encoded}"
+        mime_type, _ = mimetypes.guess_type(str(path))
+        if not mime_type or not mime_type.startswith("image/"):
+            mime_type = "image/jpeg"
+        return f"data:{mime_type};base64,{encoded}"
 
     @staticmethod
     def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -2019,7 +2335,7 @@ class AISummaryManager:
         extra: Dict[str, Any],
     ) -> str:
         """Fill prompt template placeholders with normalized summary context."""
-        transcript_text = transcript.strip() or "（无可用语音转写）"
+        transcript_text = transcript.strip() or "（无可用引用文字或语音转写）"
         visual_text = visual.strip() or "（未使用视觉兜底或无视觉观察）"
         decision = extra if isinstance(extra, dict) else {}
         if "need_visual" in decision or "transcript_quality" in decision:

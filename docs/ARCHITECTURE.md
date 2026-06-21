@@ -1,14 +1,14 @@
-# 视频 AI 总结插件架构文档
+# AI 引用内容总结插件架构文档
 
 本文档描述 `astrbot_plugin_ai_summary` 的当前运行时架构。
 
 ## 1. 系统概览
 
-`astrbot_plugin_ai_summary` 是一个 AstrBot 插件，用于从引用消息中提取视频，下载到本地后进行 ASR 转写、可选视觉兜底，再调用 LLM 生成总结。
+`astrbot_plugin_ai_summary` 是一个 AstrBot 插件，用于从引用消息中提取文字、图片、视频和合并转发集合；远端媒体会下载到本地，视频会进行 ASR 转写和可选视觉兜底，最终和图片、引用文字、转发集合展开文本一起交给 LLM 生成总结。
 
 它有三条主要入口：
 
-1. 普通消息总结流程：基于总结命令触发，要求引用含视频的消息。
+1. 普通消息总结流程：基于总结命令触发，要求引用含视频、图片、文字、图文混合或合并转发的消息。
 2. 总结问答流程：私聊和群聊都通过引用插件的总结或问答回复触发，引用正文直接作为问题；问答使用同一私聊或群聊内的总结记录和最近问答作为临时上下文。
 3. 管理员连通性测试流程：基于可配置关键词触发，只允许私聊中的 `permissions.admin_id` 对应账号使用。
 
@@ -19,18 +19,20 @@ flowchart TD
     A["AstrBot 消息事件"] --> B["main.py 入口"]
     B --> C{"是否命中总结触发条件"}
     C -- "否" --> Z["忽略"]
-    C -- "是" --> E{"是否有视频候选"}
+    C -- "是" --> E{"是否有可总结引用内容"}
     E -- "否" --> Z
-    E -- "是" --> F["下载视频到 cache/downloads"]
+    E -- "是" --> F["准备文字/图片/视频/转发"]
     E -- "是" --> D["在有候选时提取可选 user_hint"]
     F --> G["AISummaryManager"]
-    G --> H["ASR 转写"]
-    H --> I["语音转写 transcript"]
-    I --> J{"是否需要视觉兜底"}
+    G --> H["汇总引用文字和视频 ASR"]
+    G --> R["附带引用图片"]
+    H --> I["引用文字/语音转写 transcript"]
+    I --> J{"视频是否需要视觉兜底"}
     J -- "需要" --> K["视觉观察 visual"]
     J -- "不需要" --> L["visual 为空"]
     D --> M["LLM 总结"]
     I --> M
+    R --> M
     K --> M
     L --> M
     M --> N["返回总结消息"]
@@ -65,8 +67,9 @@ core/
 - 注册 AstrBot 插件
 - 监听消息事件
 - 判断权限和触发条件
-- 提取引用消息里的视频源
-- 下载视频文件
+- 提取引用消息里的文字、图片、视频源和合并转发 ID
+- 通过 `get_forward_msg` 展开合并转发节点，并把节点文本按顺序合并为一个总结候选
+- 下载远端视频和图片文件
 - 清理下载产物
 - 保存成功总结作为临时问答知识库
 - 处理引用插件回复触发的总结问答
@@ -145,9 +148,9 @@ ASR 子进程执行层，负责：
 提示词层，负责：
 
 - 提供默认总结系统提示词
-- 提供简略 / 专业两种总结模板；自动模式在运行时根据信息密度路由到其中一种
+- 提供口语 / 新闻 / 笔记三种总结模板；自动模式在运行时根据信息密度路由到合适模板
 - 提供视觉兜底判断和视觉分析提示词
-- 提供总结问答提示词，将基础总结作为视频上下文补充，同时允许通用知识类回答
+- 提供总结问答提示词，将基础总结作为当前引用内容上下文补充，同时允许通用知识类回答
 - 作为插件唯一内置提示词来源，WebUI 不再暴露自定义提示词入口
 
 ## 3. 请求流
@@ -155,30 +158,32 @@ ASR 子进程执行层，负责：
 ### 3.1 普通总结流程
 
 1. `main.py` 接收消息事件。
-2. 判断是否命中自动 / 简略 / 专业任一总结命令，并记录本次请求的总结模式。
+2. 判断是否命中自动 / 口语 / 新闻 / 笔记任一总结命令，并记录本次请求的总结模式。
 3. 用 `permissions` 做访问控制。
-4. 从引用消息中提取视频源，并去重；没有视频候选时流程结束。
-5. 确认存在视频候选后，如果消息文本中除总结命令外还有内容，会提取为可选的 `user_hint`。
-6. 下载视频到 `cache_dir/downloads/`。
+4. 从引用消息中提取文字、图片、视频源和合并转发 ID，并去重；没有可总结引用内容时流程结束。
+5. 确认存在候选内容后，如果消息文本中除总结命令外还有内容，会提取为可选的 `user_hint`。
+6. 下载远端视频和图片到 `cache_dir/downloads/`，本地图片路径只引用不清理。
 7. 把候选元数据交给 `AISummaryManager`。
-8. `AISummaryManager` 先转写，再按需要做视觉兜底。
-9. 总结 prompt 会携带可选 `user_hint`、转写内容和视觉内容；当 ASR 返回 timestamp 时，转写内容会带时间段，方便最终专业总结保留关键时间点。
+8. `AISummaryManager` 汇总引用文字、合并转发集合展开文本、图片输入和视频 ASR；仅在包含视频时准备本地 ASR 运行时，并按需要做视频视觉兜底。
+9. 总结 prompt 会携带可选 `user_hint`、引用文字 / 语音转写和视觉内容；当 ASR 返回 timestamp 时，转写内容会带时间段，方便最终笔记总结保留关键时间点。
 10. 生成总结并保存为同一私聊或群聊下的临时问答知识库。
 11. 每条总结独立回发，并在回复内容里附带 `问答ID` 标记；后续引用该 AI 回复时会优先选择该记录。
+
+合并转发展开只读取第一层平铺节点，并保留节点顺序和发送者标签，例如 `合并转发[1] > 消息[2]`。节点中再次包含的子转发不会继续展开；默认最多展开 100 条第一层节点、保留 16 张图片和 4 个视频；超出部分会在输入文本中标记截断，避免超长转发压垮上下文或下载任务。
 
 ### 3.2 总结问答流程
 
 1. 私聊和群聊都只按引用触发：必须引用插件的总结或问答回复，引用消息中的正文直接作为问题。
 2. 发送 `qa.exit_commands` 中任一命令会结束本轮问答，但保留知识库记录和引用绑定；发送 `qa.clear_commands` 中任一命令会删除当前 scope 的知识库记录和上下文绑定。
-3. 插件只接受引用绑定的 AI 回复作为问答入口，避免多个视频并存时自动串错上下文。
-4. 每条插件总结或问答回复都会附带可解析的 `问答ID` 标记，并尽量记录平台返回的消息 ID 作为额外绑定；用户引用哪条 AI 回复，就优先读取那条回复绑定的视频总结。
+3. 插件只接受引用绑定的 AI 回复作为问答入口，避免多条总结并存时自动串错上下文。
+4. 每条插件总结或问答回复都会附带可解析的 `问答ID` 标记，并尽量记录平台返回的消息 ID 作为额外绑定；用户引用哪条 AI 回复，就优先读取那条回复绑定的总结。
 5. 如果平台不返回消息 ID，插件仍会从引用消息内容中的 `问答ID` 解析记录；如果记录已过期或被清理，则返回缺失提示。
 6. 权限检查复用 `permissions`。
 7. 插件按私聊发送者或群号生成 scope，并清理已超过空闲 TTL 的记录。
 8. 引用绑定记录时读取对应总结记录。
 9. 读取成功会刷新 `last_accessed_at`，后续清理按这次检索时间重新计算。
 10. `AISummaryManager.answer_summary_question()` 把基础总结、最近问答和用户问题发送给 LLM。
-11. 如果问题询问视频事实而基础总结没有覆盖，提示词要求模型说明未覆盖；如果问题询问通用知识、制作方法、工具建议或背景解释，模型可以使用通用知识回答，并区分通用判断和视频总结中可确认的信息。
+11. 如果问题询问引用内容事实而基础总结没有覆盖，提示词要求模型说明未覆盖；如果问题询问通用知识、制作方法、工具建议或背景解释，模型可以使用通用知识回答，并区分通用判断和总结中可确认的信息。
 12. LLM 返回答案后，插件把本轮用户问题和 AI 回答作为一个问答 pair 追加到对应记录，并按 `qa.history_turns` 保留最近 N 轮。
 
 ### 3.3 管理员连通性测试流程
@@ -211,6 +216,8 @@ sequenceDiagram
 ### `llm`
 
 - `provider_source`：大模型提供商来源，下拉选择 AstrBot 内置提供商或插件自定义提供商
+- `persona.enable`：是否启用总结基础人设；关闭时即使 `persona.persona_id` 已选择也不会叠加人设
+- `persona.persona_id`：选择 AstrBot 中已配置的人设；启用后会作为最终总结和总结问答的基础 system prompt
 - `astrbot_provider.provider_id`：选择 AstrBot 中的 LLM Provider；留空时尝试使用当前会话 AI
 - `custom_provider.provider`：插件自定义接口的厂商类型
 - `custom_provider.base_url`：插件自定义接口地址
@@ -250,7 +257,7 @@ sequenceDiagram
 
 ### `高级质量`
 
-- `summary.max_concurrent`：总结并发上限，同时约束跨消息总结和单条消息内多视频总结
+- `summary.max_concurrent`：总结并发上限，同时约束跨消息总结和单条消息内多候选总结
 - `summary.request_timeout_seconds`：总结请求超时时间
 - `vision.max_concurrent`：视觉识别批次并发上限
 - `vision.jpeg_quality`：ffmpeg 输出 JPEG 的压缩质量
@@ -264,7 +271,7 @@ sequenceDiagram
 
 ### 内置提示词
 
-总结、视觉兜底判断和视觉分析提示词由 `core/summary/prompts.py` 统一提供，不再通过 WebUI 暴露自定义提示词入口。
+总结、视觉兜底判断和视觉分析提示词由 `core/summary/prompts.py` 统一提供，不再通过 WebUI 暴露自定义提示词入口。配置了 `llm.persona.enable` 且 `llm.persona.persona_id` 不为空时，插件会从 AstrBot `Context.persona_manager` 读取对应人设的 system prompt，并只在最终总结和总结问答的用户可见 LLM 请求中作为基础 system prompt 前置；视觉判定、视觉观察、格式修复和连通性测试继续使用各自的中立任务提示。
 
 内置模板变量：
 
@@ -290,7 +297,7 @@ sequenceDiagram
 ### `admin`
 
 - `debug_mode`：调试日志
-- `test_keyword`：管理员连通性测试关键词，默认 `aiping`；仅 `permissions.admin_id` 对应账号在私聊中发送时生效，不触发视频总结
+- `test_keyword`：管理员连通性测试关键词，默认 `aiping`；仅 `permissions.admin_id` 对应账号在私聊中发送时生效，不触发内容总结
 
 ## 5. 运行时状态与存储
 
@@ -298,7 +305,7 @@ sequenceDiagram
 
 - `cache_dir`：插件根缓存目录
 - `cache_dir/runtime/`：运行时状态目录
-- `cache_dir/downloads/`：视频下载目录
+- `cache_dir/downloads/`：远端视频、图片下载目录
 - `cache_dir/runtime/images/`：图片发送模式生成的临时总结和问答图片目录
 - `cache_dir/runtime/summary_tmp/`：临时音频、转写和视觉分析目录
 - `cache_dir/runtime/qa_records/`：总结问答临时知识库记录目录
@@ -336,7 +343,7 @@ sequenceDiagram
 
 ### LLM 相关依赖
 
-当 `llm.provider_source` 选择 AstrBot 内置提供商时，插件通过 AstrBot `Context.llm_generate()` 调用 `llm.astrbot_provider.provider_id` 指定的 Provider；未指定时尝试使用当前会话 Provider。
+当 `llm.provider_source` 选择 AstrBot 内置提供商时，插件通过 AstrBot `Context.llm_generate()` 调用 `llm.astrbot_provider.provider_id` 指定的 Provider；未指定时尝试使用当前会话 Provider。`llm.persona` 独立于 Provider 来源，启用后会把选中人设解析为 system prompt 并前置到最终总结和问答请求中。
 
 当 `llm.provider_source` 选择插件自定义提供商时，由 `LLMClient` 按 `llm.custom_provider` 中的厂商配置构造请求，当前支持的协议分支包括：
 

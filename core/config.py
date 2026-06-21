@@ -71,6 +71,8 @@ class AISummaryConfig:
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     llm_provider_source: str = "astrbot"
     astrbot_provider_id: str = ""
+    enable_persona: bool = False
+    persona_id: str = ""
     llm_provider: str = "openai_compatible"
     base_url: str = ""
     api_key: str = ""
@@ -226,6 +228,23 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
     )
     astrbot_provider_raw = _dict(llm_raw.get("astrbot_provider", {}))
     custom_provider_raw = _dict(llm_raw.get("custom_provider", {}))
+    persona_raw_value = llm_raw.get("persona", {})
+    has_persona_object = "persona" in llm_raw and isinstance(persona_raw_value, dict)
+    persona_raw = _dict(persona_raw_value)
+    legacy_persona_id = str(
+        llm_raw.get("persona_id", "")
+        or astrbot_provider_raw.get("persona_id", "")
+        or ""
+    ).strip()
+    persona_id = str(
+        persona_raw.get("persona_id", "") if has_persona_object else legacy_persona_id
+    ).strip()
+    enable_persona = bool(
+        persona_raw.get(
+            "enable",
+            bool(legacy_persona_id) if not has_persona_object else False,
+        )
+    )
 
     cache_dir = _default_cache_dir()
     model_dir = os.path.join(cache_dir, "models", "funasr")
@@ -281,6 +300,8 @@ def parse_config(config: Dict[str, Any]) -> AISummaryConfig:
         astrbot_provider_id=str(
             astrbot_provider_raw.get("provider_id", "") or ""
         ).strip(),
+        enable_persona=enable_persona,
+        persona_id=persona_id,
         llm_provider=provider,
         base_url=base_url,
         api_key=str(custom_provider_raw.get("api_key", "") or "").strip(),

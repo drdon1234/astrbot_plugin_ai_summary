@@ -6,13 +6,13 @@
             "reply_keyword_trigger": {
                 "description": "引用+命令触发总结",
                 "type": "bool",
-                "hint": "引用含视频的消息并附总结命令即可触发",
+                "hint": "引用含视频、图片、文字、图文混合或合并转发的消息并附总结命令即可触发",
                 "default": true
             },
             "auto_keywords": {
                 "description": "自动总结命令",
                 "type": "list",
-                "hint": "根据视频内容自动选择口语概述、新闻摘要或笔记总结；适合作为默认总结入口",
+                "hint": "根据引用内容自动选择口语概述、新闻摘要或笔记总结；适合作为默认总结入口",
                 "default": [
                     "总结一下",
                     "总结视频",
@@ -87,7 +87,7 @@
             "history_turns": {
                 "description": "短对话记忆轮数",
                 "type": "int",
-                "hint": "每个视频记录最近 N 轮问答并作为连续追问上下文；默认 5，0 表示不保留问答历史",
+                "hint": "每条总结记录最近 N 轮问答并作为连续追问上下文；默认 5，0 表示不保留问答历史",
                 "default": 5
             }
         }
@@ -105,6 +105,26 @@
                 ],
                 "hint": "选择使用 AstrBot 已配置的 LLM，或使用本插件独立配置的 LLM 接口",
                 "default": "AstrBot 内置提供商"
+            },
+            "persona": {
+                "description": "总结基础人设",
+                "type": "object",
+                "hint": "控制是否将 AstrBot 已配置的人设叠加到最终总结和问答中",
+                "items": {
+                    "enable": {
+                        "description": "启用基础人设",
+                        "type": "bool",
+                        "hint": "开启后，最终总结和问答会先叠加下方指定人设的 system prompt；关闭后即使已选择人设也不会使用",
+                        "default": false
+                    },
+                    "persona_id": {
+                        "description": "指定人设ID",
+                        "type": "string",
+                        "hint": "可选择 AstrBot 已配置的人设；如果选择器无法清空，可关闭上方开关停用人设",
+                        "_special": "select_persona",
+                        "default": ""
+                    }
+                }
             },
             "astrbot_provider": {
                 "description": "AstrBot 内置提供商",
@@ -506,7 +526,7 @@
             "test_keyword": {
                 "description": "管理员测试命令关键词",
                 "type": "string",
-                "hint": "仅 permissions.admin_id 对应账号在私聊中发送该关键词时触发 AI 连通性测试，不会触发视频总结",
+                "hint": "仅 permissions.admin_id 对应账号在私聊中发送该关键词时触发 AI 连通性测试，不会触发内容总结",
                 "default": "aiping"
             }
         }
