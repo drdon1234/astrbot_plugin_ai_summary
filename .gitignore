@@ -14,6 +14,6 @@ plugin_data/
 *.log
 .env
 *.zip
-test/
+/test/
 tests/
 scripts/

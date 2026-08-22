@@ -102,7 +102,7 @@ class QARequest:
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "支持引用视频、图片和文字的多模态 AI 总结工具",
-    "0.4.0",
+    "0.4.1",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered summaries."""

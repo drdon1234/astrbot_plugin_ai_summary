@@ -93,8 +93,14 @@ class AISummaryManager:
         "受伤",
         "死亡",
         "事故",
-        "事件",
         "发布通报",
+        "官方声明",
+        "官方通报",
+        "记者",
+        "据报道",
+        "消息称",
+        "公告",
+        "新闻",
         "news",
         "police",
         "case",
@@ -103,15 +109,67 @@ class AISummaryManager:
         "警方",
         "通报",
         "公安",
-        "违法",
-        "犯罪",
-        "嫌疑",
-        "伤情",
-        "受伤",
-        "死亡",
-        "事故",
+        "官方声明",
+        "官方通报",
+        "据报道",
+        "消息称",
+        "新闻报道",
         "发布通报",
         "police",
+    )
+    _AUTO_NARRATIVE_KEYWORDS = (
+        "故事",
+        "讲故事",
+        "故事讲述",
+        "电影",
+        "影片",
+        "电影解说",
+        "影视解说",
+        "剧情解说",
+        "影视剧",
+        "电视剧",
+        "动画片",
+        "剧情",
+        "片中",
+        "电影中",
+        "主角",
+        "主人公",
+        "角色",
+        "反派",
+        "结局",
+        "情节",
+        "讲述的是",
+        "这部片",
+        "这部电影",
+        "有一天",
+        "没想到",
+        "却发现",
+        "story",
+        "movie",
+        "film",
+        "plot",
+        "character",
+        "protagonist",
+        "villain",
+        "ending",
+        "recap",
+        "explained",
+    )
+    _AUTO_STRONG_NARRATIVE_KEYWORDS = (
+        "电影解说",
+        "影视解说",
+        "剧情解说",
+        "故事讲述",
+        "电影剧情",
+        "这部电影",
+        "这部影片",
+        "影视剧",
+        "电视剧",
+        "动画片",
+        "movie recap",
+        "film recap",
+        "plot explained",
+        "story recap",
     )
     _AUTO_LOW_INFO_KEYWORDS = (
         "bgm",
@@ -1031,15 +1089,18 @@ class AISummaryManager:
             if style == "oral":
                 return (
                     "本次最终总结必须输出简洁 Markdown。第一行必须是唯一的 h1 标题，"
-                    "标题应直接概括引用内容主题；标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
+                    "标题应直接概括引用内容主题；单一完整事件标题后直接输出 1-2 个自然段，信息密度很高时最多 3 个自然段。"
+                    "如果确认是多个独立事件/片段的合集/串烧，每个事件必须单独成段或使用简短小标题，段数按事件数量展开，不能合并不同事件。"
                     "不要使用“##”二级章节、表格、固定栏目、代码块或 HTML；不要输出“关键总结”“事件脉络”"
                     "“内容脉络”“主体关系”“经验启示”“应对建议”等章节。"
                 )
             if style == "news":
                 return (
                     "本次最终总结必须输出新闻摘要 Markdown。第一行必须是唯一的 h1 标题，"
-                    "标题直接概括事件；后续优先使用“## 事件背景概述”“## 核心事件经过”"
-                    "“## 关键数据与身份信息”“## 总结与当前处置进展”四个章节。"
+                    "单一事件时标题直接概括事件，后续优先使用“## 事件背景概述”“## 核心事件经过”"
+                    "“## 关键数据与身份信息”“## 总结与当前处置进展”四个章节；"
+                    "多个独立事件/案例时，先用“## 事件一：…”等小标题分组，并在每组内分别整理适用的背景、经过、身份数据和处置进展。"
+                    "不得把多个事件共用一条时间线或一组主体。"
                     "短段落和 bullet 都要适合图片卡片渲染；不要输出表格、代码块或 HTML。"
                 )
             return (
@@ -1051,6 +1112,8 @@ class AISummaryManager:
                 "“经验启示”只有在引用内容确实提供可迁移经验、风险教训或决策启发时才输出，"
                 "不要为了固定格式强行添加。如果语音转写中带有 [mm:ss-mm:ss] 时间段，"
                 "可以在事件脉络或内容脉络中保留对应起始时间点；没有时间段时不要编造时间戳。"
+                "如果确认是多个独立事件/片段的合集/串烧，必须为每个事件分别组织关键总结、内容脉络、主体关系和结论，"
+                "可使用事件小标题，不得把不同事件的信息混写。"
                 "可以使用列表、加粗、引用和表格，但不要把整段结果包裹在代码块中，不要输出 HTML。"
             )
         return (
@@ -1084,18 +1147,27 @@ class AISummaryManager:
         configured = self._configured_summary_style(metadata)
         if configured != "auto":
             return configured
-        return self._auto_summary_style(transcript, visual, visual_decision or {})
+        user_hint = ""
+        if isinstance(metadata, dict):
+            user_hint = str(metadata.get("user_hint", "") or "")
+        return self._auto_summary_style(
+            transcript,
+            visual,
+            visual_decision or {},
+            user_hint,
+        )
 
     def _auto_summary_style(
         self,
         transcript: str,
         visual: str,
         visual_decision: Dict[str, Any],
+        user_hint: str = "",
     ) -> str:
         """Choose oral, news, or note mode from input density and structure."""
         quality = str(visual_decision.get("transcript_quality", "") or "").casefold()
         plain_transcript = self._strip_transcript_timestamps(transcript)
-        combined = f"{plain_transcript}\n{visual}".casefold()
+        combined = f"{plain_transcript}\n{visual}\n{user_hint}".casefold()
         transcript_chars = len(plain_transcript.strip())
         segment_count = len(re.findall(r"\[\d{2}:\d{2}-\d{2}:\d{2}\]", transcript))
         number_count = len(re.findall(r"\d+(?:\.\d+)?(?:%|％)?", plain_transcript))
@@ -1115,9 +1187,23 @@ class AISummaryManager:
             1 for keyword in self._AUTO_LOW_INFO_KEYWORDS
             if keyword.casefold() in combined
         )
+        narrative_hits = sum(
+            1
+            for keyword in self._AUTO_NARRATIVE_KEYWORDS
+            if keyword.casefold() in combined
+        )
+        strong_narrative_hits = sum(
+            1
+            for keyword in self._AUTO_STRONG_NARRATIVE_KEYWORDS
+            if keyword.casefold() in combined
+        )
         visual_high_density = "信息密度：高" in visual or "信息密度: 高" in visual
 
         if quality in {"empty", "low"} and transcript_chars < 1200 and not visual_high_density:
+            return "oral"
+        # Film/story commentary often mentions crimes, police, investigations, or
+        # deaths as plot elements. Narrative signals must win before news scoring.
+        if strong_narrative_hits >= 1 or narrative_hits >= 2:
             return "oral"
         if strong_news_hits >= 2 and transcript_chars >= 80:
             return "news"
