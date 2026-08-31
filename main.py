@@ -26,6 +26,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.star.filter.event_message_type import EventMessageType
 
 from .core.config import AISummaryConfig, parse_config
+from .core.font_assets import FontAssetError, ensure_font_assets
 from .core.output_render import render_summary_image_file
 from .core.qa_runtime import (
     qa_missing_record_message,
@@ -102,7 +103,7 @@ class QARequest:
     "astrbot_plugin_ai_summary",
     "drdon1234",
     "支持引用视频、图片和文字的多模态 AI 总结工具",
-    "0.4.1",
+    "0.4.2",
 )
 class AISummaryPlugin(Star):
     """AstrBot plugin entry point for reply-triggered summaries."""
@@ -136,6 +137,18 @@ class AISummaryPlugin(Star):
         self._qa_cleanup_task: Optional[asyncio.Task[Any]] = None
         self._qa_reply_bindings: Dict[str, Dict[str, str]] = {}
         self._semaphore = asyncio.Semaphore(max(1, self.config.max_concurrent))
+
+    async def initialize(self) -> None:
+        """Prepare image fonts without making other plugin features unavailable."""
+        try:
+            await ensure_font_assets()
+        except asyncio.CancelledError:
+            raise
+        except FontAssetError as exc:
+            logger.warning(
+                "AI 总结字体资源准备失败，将在首次图片渲染时重试: "
+                f"{exc}"
+            )
 
     async def terminate(self):
         """Stop active summary tasks, release runtimes, and clear runtime files."""

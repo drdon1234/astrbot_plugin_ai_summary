@@ -83,12 +83,21 @@ core/
 - 解析触发器、LLM、权限、输出控制和管理员调试配置
 - 生成插件运行所需的默认缓存路径
 
+### `core/font_assets.py`
+
+字体资源层，负责：
+
+- 维护字体仓库 `v1.0.0` Release 的固定文件清单、大小和 SHA-256
+- 插件初始化时检查并补全 `resource/font/` 下的八个字体文件
+- 串行化并发检查，把下载内容写入唯一 `.part` 文件，完整校验后再原子替换目标文件
+- 图片渲染前复用已就绪状态做轻量检查，并在字体缺失或启动下载失败时重新补全
+
 ### `core/output_render.py`
 
 输出渲染层，负责：
 
 - 使用 Pillow 将纯文本或常见 Markdown 结构绘制为温和浅色单列卡片 PNG
-- 固定加载插件本地 `resource/font/NotoSansCJKsc-Regular.otf` 与 `resource/font/NotoSansCJKsc-Bold.otf` 字体文件，避免依赖系统中文字体
+- 在字体资源层确认文件完整后，从插件本地 `resource/font/` 加载所选字体，避免依赖系统中文字体
 - 通过 `output.image_font_size` 控制图片正文基础字号，标题和小标题按比例缩放
 - 不依赖外部截图渲染器
 
@@ -287,9 +296,10 @@ sequenceDiagram
 
 - `status_message`：是否发送处理中提示
 - `summary_format`：最终总结内容格式，可选纯文本或 Markdown
-- `send_format`：最终总结发送格式，可选文本或图片；图片模式通过 Pillow 和插件本地字体生成温和浅色单列卡片图片
+- `send_format`：最终总结发送格式，可选文本或图片；图片模式通过 Pillow 和从独立字体仓库自动补全的本地字体生成图片
 - `qa_answer_format`：最终问答回答格式，可选纯文本或 Markdown
 - `qa_send_format`：最终问答发送格式，可选文本或图片；图片模式会把 `问答ID` 作为同条消息里的文本标记一起发送
+- `image_font_family`：图片发送模式使用的字体；仅允许使用固定清单中的五个字体家族
 - `image_font_size`：图片发送模式使用的正文基础字号，建议范围 16-48，标题和小标题按比例放大
 - `show_error`：是否回显失败原因
 - `enable_summary_repair`：是否在最终回复前启用格式修复，默认清理原始转写泄漏、非标准核对标记和不一致的不确定性注释
@@ -309,6 +319,7 @@ sequenceDiagram
 - `cache_dir/runtime/images/`：图片发送模式生成的临时总结和问答图片目录
 - `cache_dir/runtime/summary_tmp/`：临时音频、转写和视觉分析目录
 - `cache_dir/runtime/qa_records/`：总结问答临时知识库记录目录
+- `resource/font/`：从字体仓库 `v1.0.0` Release 下载并校验的图片字体目录
 
 运行时状态主要包括：
 
@@ -333,6 +344,7 @@ sequenceDiagram
 - `aiohttp`
 - `ffmpeg`
 - Pillow：仅图片发送模式需要；直接执行文本转图片，不依赖浏览器截图环境
+- GitHub 字体仓库 `v1.0.0` Release：首次准备字体或本地字体缺失、损坏时访问
 
 ### ASR 相关依赖
 

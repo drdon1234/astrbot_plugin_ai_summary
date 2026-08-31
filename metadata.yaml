@@ -1,5 +1,5 @@
 name: astrbot_plugin_ai_summary
 desc: 支持引用视频、图片、文字和合并转发的多模态 AI 总结工具
-version: v0.4.1
+version: v0.4.2
 author: drdon1234
 repo: https://github.com/drdon1234/astrbot_plugin_ai_summary

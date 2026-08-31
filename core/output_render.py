@@ -7,7 +7,9 @@ import re
 from pathlib import Path
 from typing import List
 
-_FONT_DIR = Path(__file__).resolve().parent.parent / "resource" / "font"
+from .font_assets import FONT_DIR as _FONT_DIR, ensure_font_assets
+
+
 _FONT_FAMILIES = {
     "noto_sans": ("NotoSansCJKsc-Regular.otf", "NotoSansCJKsc-Bold.otf"),
     "noto_serif": ("NotoSerifCJKsc-Regular.otf", "NotoSerifCJKsc-Bold.otf"),
@@ -40,7 +42,8 @@ async def render_summary_image_file(
     font_family: str = "noto_sans",
     timeout_seconds: int = 60,
 ) -> str:
-    """Render a summary to a PNG file using a bundled Pillow font family."""
+    """Render a summary to a PNG file using a managed Pillow font family."""
+    await ensure_font_assets()
     output = Path(output_path).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     normalized_style = _normalize_image_style(style)
@@ -1232,7 +1235,7 @@ def _load_pillow_font(
 
 
 def _default_font_path(*, bold: bool, font_family: str = "noto_sans") -> Path:
-    """Return one of the bundled font paths; arbitrary system paths are not allowed."""
+    """Return a managed font path; arbitrary system paths are not allowed."""
     family = _normalize_image_font_family(font_family)
     regular_name, bold_name = _FONT_FAMILIES.get(
         family,

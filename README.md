@@ -9,7 +9,7 @@ _✨ 引用视频、图片、文字或合并转发并生成总结 ✨_
 [![License](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-orange.svg)](https://github.com/AstrBotDevs/AstrBot)
-[![Version](https://img.shields.io/badge/Version-v0.4.1-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
+[![Version](https://img.shields.io/badge/Version-v0.4.2-green.svg)](https://github.com/drdon1234/astrbot_plugin_ai_summary)
 [![GitHub](https://img.shields.io/badge/作者-drdon1234-blue)](https://github.com/drdon1234)
 
 </div>
@@ -19,18 +19,18 @@ _✨ 引用视频、图片、文字或合并转发并生成总结 ✨_
 ## 🚀 快速开始
 
 1. 安装后在 AstrBot WebUI 的“大模型提供商”中选择 AstrBot 内置提供商，或选择插件自定义提供商并填写自定义 AI 接口
-2. 等待依赖和语音模型下载完成（AstrBot 日志可查看进度）
+2. 等待图片字体、依赖和语音模型下载完成（AstrBot 日志可查看进度）
 3. 在消息平台引用视频、图片、文字、图文混合或合并转发消息并发送总结命令即可触发总结
 
 ---
 
 ## 📝 注意事项
 
-1. 首次启动会自动准备语音转写环境和模型，耗时取决于网络环境，可在 AstrBot 日志中查看进度。
+1. 首次启动会自动准备图片字体、语音转写环境和模型，耗时取决于网络环境，可在 AstrBot 日志中查看进度。
 2. 使用时请引用包含视频、图片、文字、图文混合或合并转发的消息，再发送总结命令；命令之外的文字会作为本次总结要求。
 3. 默认使用 AstrBot 已配置的 AI，也可以在插件配置中切换为插件独立 AI 接口；`llm.persona.enable` 开启后，`llm.persona.persona_id` 选择的 AstrBot 人设会作为最终总结和问答的基础人设。
 4. 当引用内容包含图片，或视频语音信息不足时，插件会尝试结合画面补充；效果取决于所选 AI 是否支持图片理解。
-5. 可在“输出控制”中分别选择总结和问答的内容格式（纯文本 / Markdown）与发送格式（文本 / 图片），并选择图片渲染风格、内置字体和字号；图片模式默认生成清新风格图片。
+5. 可在“输出控制”中分别选择总结和问答的内容格式（纯文本 / Markdown）与发送格式（文本 / 图片），并选择图片渲染风格、自动补全的字体和字号；图片模式默认生成清新风格图片。
 6. 管理员可在私聊中发送 `aiping` 测试 AI 连通性。
 7. 总结、视觉判断和视觉分析均使用内置提示词，WebUI 不再暴露自定义提示词入口。
 8. 总结模式由触发命令决定：`总结一下` / `总结视频` / `自动总结` 为自动模式，会根据内容选择口语概述、新闻摘要或笔记总结；故事讲述、电影解说和影视剧情会优先使用精华解说式口语概述，不会仅因剧情中出现案件、警方等词语套用新闻格式。`口语概述` / `口语总结` 强制口语概述，`新闻摘要` / `事件摘要` 强制新闻摘要，`笔记总结` / `专业总结` / `详细总结` 强制笔记总结。
@@ -39,7 +39,7 @@ _✨ 引用视频、图片、文字或合并转发并生成总结 ✨_
 11. 首次总结结果会保存为同一私聊或群聊内的临时问答知识库；私聊和群聊都通过引用插件的总结或问答回复并输入问题来触发对应内容问答。每条总结会保留最近几轮问答作为短对话记忆。
 12. 问答知识库默认按最后检索时间保留 30 分钟，超过后自动清理；可在 `qa.record_ttl_minutes` 中调整，设为 `0` 可关闭自动清理。
 
-图片发送模式使用 Pillow 直接把总结或问答内容绘制为图片，并只从插件本地 `resource/font` 目录读取内置字体，不依赖浏览器截图环境或系统字体，也不开放自定义字体路径。`output.image_style` 可选 `清新`、`科技感`、`专业严肃` 或 `温和卡片`，只影响图片视觉，不改变摘要内容；`output.image_font_family` 可选 `默认黑体`、`专业宋体`、`清新文楷`、`标题手札` 或 `科技窄体`；正文基础字号可通过 `output.image_font_size` 调整，标题和小标题会按比例自动放大。
+图片发送模式使用 Pillow 直接把总结或问答内容绘制为图片。插件启动时会从独立的 [字体仓库](https://github.com/drdon1234/fonts) `v1.0.0` Release 自动检查并下载所需字体到本地 `resource/font` 目录，图片渲染前也会再次检查，以便在启动下载失败后自动恢复；所有文件均校验大小和 SHA-256。插件不依赖浏览器截图环境或系统字体，也不开放自定义字体路径。`output.image_style` 可选 `清新`、`科技感`、`专业严肃` 或 `温和卡片`，只影响图片视觉，不改变摘要内容；`output.image_font_family` 可选 `默认黑体`、`专业宋体`、`清新文楷`、`标题手札` 或 `科技窄体`；正文基础字号可通过 `output.image_font_size` 调整，标题和小标题会按比例自动放大。
 
 ---
 

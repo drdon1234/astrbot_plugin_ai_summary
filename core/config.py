@@ -600,7 +600,7 @@ def _normalize_image_style(value: Any) -> str:
 
 
 def _normalize_image_font_family(value: Any) -> str:
-    """Normalize image font family to a bundled font key."""
+    """Normalize image font family to a managed font key."""
     text = str(value or "").strip()
     lowered = text.casefold()
     mapping = {
